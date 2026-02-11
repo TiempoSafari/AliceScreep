@@ -23,6 +23,8 @@ python novel_downloader.py
 
 程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面。
 
+默认流程为：**下载数据 → 打开编辑界面 → 修改章节名/封面 → 再保存 EPUB**。
+
 ## 命令行模式（可选）
 
 ```bash
@@ -73,3 +75,13 @@ python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_273
 - 使用 `ttk` 主题组件，优先启用 `vista/xpnative`（可用时），更接近 Windows 新风格。
 - 增加顶部标题区、卡片式参数区、进度条和深色日志面板。
 - 日志颜色：成功绿色，失败/警告红色。
+
+
+## 下载后编辑功能
+
+GUI 下载完成后会弹出“编辑章节与封面”窗口，可进行：
+
+- 修改书名、作者
+- 逐章修改章节标题（选择章节后点“应用章节名”）
+- 替换封面图片（JPG/PNG）
+- 确认后再导出 EPUB

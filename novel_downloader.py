@@ -48,6 +48,15 @@ class NovelMeta:
     language: str = "zh-Hant"
 
 
+@dataclass
+class DownloadPayload:
+    meta: NovelMeta
+    chapters: list[ChapterContent]
+    cover_bytes: bytes | None
+    cover_type: str | None
+    cover_name: str | None
+
+
 class AnchorParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -506,14 +515,13 @@ def download_chapters(
     return results
 
 
-def run_download(
+def download_novel_payload(
     input_url: str,
-    output_file: Path,
     start: int,
     end: int,
     delay: float,
     logger: Callable[[str], None] = print,
-) -> int:
+) -> DownloadPayload | None:
     logger(f"输入链接: {input_url}")
 
     chapter_index_url = build_chapter_index_url(input_url)
@@ -527,7 +535,7 @@ def run_download(
         index_html = fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0)
     except URLError as exc:
         logger(f"❌ 目录页请求失败: {exc}")
-        return 1
+        return None
 
     meta = extract_meta(index_html)
     logger(f"小说信息: 标题={meta.title} | 作者={meta.author}")
@@ -535,7 +543,7 @@ def run_download(
     chapters = discover_chapters(chapter_index_url, index_html, logger=logger)
     if not chapters:
         logger("❌ 未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
-        return 1
+        return None
 
     safe_start = max(start, 1)
     safe_end = end if end > 0 else len(chapters)
@@ -543,13 +551,13 @@ def run_download(
 
     if not selected:
         logger("❌ 筛选后没有章节，请检查起始章节/结束章节。")
-        return 1
+        return None
 
     logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
     downloaded = download_chapters(selected, delay=max(delay, 0), logger=logger)
     if not downloaded:
         logger("❌ 没有成功下载任何章节，未生成 EPUB。")
-        return 1
+        return None
 
     cover_bytes = None
     cover_type = None
@@ -567,14 +575,49 @@ def run_download(
         except Exception as exc:
             logger(f"❌ [警告] 获取封面失败，将生成无封面 EPUB: {exc}")
 
+    return DownloadPayload(
+        meta=meta,
+        chapters=downloaded,
+        cover_bytes=cover_bytes,
+        cover_type=cover_type,
+        cover_name=cover_name,
+    )
+
+
+def save_payload_to_epub(
+    payload: DownloadPayload,
+    output_file: Path,
+    logger: Callable[[str], None] = print,
+) -> int:
     if output_file.suffix.lower() != ".epub":
         output_file = output_file.with_suffix(".epub")
         logger(f"输出格式已切换为 EPUB: {output_file}")
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    build_epub(output_file, meta, downloaded, cover_bytes, cover_type, cover_name)
-    logger(f"✅ 完成：共写入 {len(downloaded)} 章 -> {output_file}")
+    build_epub(
+        output_file,
+        payload.meta,
+        payload.chapters,
+        payload.cover_bytes,
+        payload.cover_type,
+        payload.cover_name,
+    )
+    logger(f"✅ 完成：共写入 {len(payload.chapters)} 章 -> {output_file}")
     return 0
+
+
+def run_download(
+    input_url: str,
+    output_file: Path,
+    start: int,
+    end: int,
+    delay: float,
+    logger: Callable[[str], None] = print,
+) -> int:
+    payload = download_novel_payload(input_url, start, end, delay, logger=logger)
+    if payload is None:
+        return 1
+    return save_payload_to_epub(payload, output_file, logger=logger)
 
 
 def parse_args() -> argparse.Namespace:
@@ -604,7 +647,7 @@ def launch_gui() -> int:
         return 1
 
     root.title("AliceSW 小说下载器")
-    root.geometry("900x680")
+    root.geometry("920x700")
     root.configure(bg="#f4f6fb")
 
     style = ttk.Style(root)
@@ -624,7 +667,7 @@ def launch_gui() -> int:
     header = ttk.Frame(container)
     header.pack(fill="x", pady=(0, 8))
     ttk.Label(header, text="AliceSW EPUB 下载器", style="Title.TLabel").pack(anchor="w")
-    ttk.Label(header, text="Windows 风格界面 | 支持章节过滤、重试、封面与元数据", style="Sub.TLabel").pack(anchor="w")
+    ttk.Label(header, text="下载 → 编辑章节名/封面 → 保存 EPUB", style="Sub.TLabel").pack(anchor="w")
 
     card = ttk.Frame(container, padding=12)
     card.pack(fill="x", pady=(6, 8))
@@ -666,7 +709,7 @@ def launch_gui() -> int:
     progress = ttk.Progressbar(container, mode="indeterminate")
     progress.pack(fill="x", pady=(0, 8))
 
-    log_box = ScrolledText(container, height=24, font=("Consolas", 10), bg="#0f172a", fg="#e2e8f0", insertbackground="#e2e8f0")
+    log_box = ScrolledText(container, height=23, font=("Consolas", 10), bg="#0f172a", fg="#e2e8f0", insertbackground="#e2e8f0")
     log_box.pack(fill="both", expand=True, pady=(0, 10))
     log_box.tag_config("error", foreground="#ff6b6b")
     log_box.tag_config("success", foreground="#4ade80")
@@ -696,6 +739,115 @@ def launch_gui() -> int:
         else:
             progress.stop()
 
+    def open_editor(payload: DownloadPayload, output_path: str) -> bool:
+        editor = tk.Toplevel(root)
+        editor.title("编辑章节与封面")
+        editor.geometry("860x620")
+        editor.transient(root)
+        editor.grab_set()
+
+        editor_frame = ttk.Frame(editor, padding=12)
+        editor_frame.pack(fill="both", expand=True)
+
+        ttk.Label(editor_frame, text="书名").grid(row=0, column=0, sticky="w")
+        title_var = tk.StringVar(value=payload.meta.title)
+        ttk.Entry(editor_frame, textvariable=title_var, width=72).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
+
+        ttk.Label(editor_frame, text="作者").grid(row=1, column=0, sticky="w")
+        author_var = tk.StringVar(value=payload.meta.author)
+        ttk.Entry(editor_frame, textvariable=author_var, width=30).grid(row=1, column=1, sticky="w", pady=4)
+
+        cover_var = tk.StringVar(value=payload.cover_name or "(当前无封面)")
+        ttk.Label(editor_frame, text="封面").grid(row=1, column=2, sticky="e")
+        ttk.Label(editor_frame, textvariable=cover_var).grid(row=1, column=3, sticky="w", padx=(6, 0))
+
+        list_frame = ttk.Frame(editor_frame)
+        list_frame.grid(row=2, column=0, columnspan=4, sticky="nsew", pady=(8, 6))
+
+        chapter_list = tk.Listbox(list_frame, height=20)
+        chapter_list.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=chapter_list.yview)
+        scrollbar.pack(side="right", fill="y")
+        chapter_list.configure(yscrollcommand=scrollbar.set)
+
+        for i, ch in enumerate(payload.chapters, start=1):
+            chapter_list.insert("end", f"{i:03d}. {ch.title}")
+
+        edit_frame = ttk.Frame(editor_frame)
+        edit_frame.grid(row=3, column=0, columnspan=4, sticky="we")
+        ttk.Label(edit_frame, text="章节名").pack(side="left")
+        chapter_title_var = tk.StringVar()
+        chapter_entry = ttk.Entry(edit_frame, textvariable=chapter_title_var)
+        chapter_entry.pack(side="left", fill="x", expand=True, padx=8)
+
+        def on_select(_event: object = None) -> None:
+            sel = chapter_list.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            chapter_title_var.set(payload.chapters[idx].title)
+
+        def apply_title() -> None:
+            sel = chapter_list.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            new_title = normalize_chapter_title(chapter_title_var.get())
+            payload.chapters[idx].title = new_title
+            chapter_list.delete(idx)
+            chapter_list.insert(idx, f"{idx+1:03d}. {new_title}")
+            chapter_list.selection_set(idx)
+            chapter_list.activate(idx)
+
+        chapter_list.bind("<<ListboxSelect>>", on_select)
+        ttk.Button(edit_frame, text="应用章节名", command=apply_title).pack(side="left")
+
+        def replace_cover() -> None:
+            path = filedialog.askopenfilename(
+                title="选择封面图片",
+                filetypes=[("Image", "*.jpg *.jpeg *.png"), ("All files", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                raw = Path(path).read_bytes()
+            except Exception as exc:
+                messagebox.showerror("错误", f"读取封面失败: {exc}", parent=editor)
+                return
+            suffix = Path(path).suffix.lower()
+            if suffix == ".png":
+                payload.cover_type = "image/png"
+                payload.cover_name = "cover.png"
+            else:
+                payload.cover_type = "image/jpeg"
+                payload.cover_name = "cover.jpg"
+            payload.cover_bytes = raw
+            cover_var.set(Path(path).name)
+
+        action_frame = ttk.Frame(editor_frame)
+        action_frame.grid(row=4, column=0, columnspan=4, sticky="we", pady=(8, 0))
+        saved = {"ok": False}
+
+        def save_and_close() -> None:
+            payload.meta.title = title_var.get().strip() or payload.meta.title
+            payload.meta.author = author_var.get().strip() or payload.meta.author
+            if not payload.chapters:
+                messagebox.showerror("错误", "没有可保存的章节。", parent=editor)
+                return
+            saved["ok"] = True
+            editor.destroy()
+
+        ttk.Button(action_frame, text="更换封面", command=replace_cover).pack(side="left")
+        ttk.Button(action_frame, text="保存修改并导出", style="Accent.TButton", command=save_and_close).pack(side="right")
+        ttk.Button(action_frame, text="取消", command=editor.destroy).pack(side="right", padx=(0, 8))
+
+        editor_frame.columnconfigure(1, weight=1)
+        editor_frame.columnconfigure(3, weight=1)
+        editor_frame.rowconfigure(2, weight=1)
+
+        editor.wait_window()
+        return saved["ok"]
+
     def start_download() -> None:
         if downloading["active"]:
             messagebox.showinfo("提示", "下载正在进行中，请稍候。")
@@ -717,24 +869,30 @@ def launch_gui() -> int:
 
         set_running(True)
         log_box.delete("1.0", "end")
-        log("开始下载 EPUB...")
-        log("提示：已开启失败重试机制，偶发网络抖动会自动重试。")
+        log("开始下载 EPUB 数据...")
+        log("提示：下载完成后会进入“编辑章节/封面”界面。")
 
         def worker() -> None:
-            code = run_download(input_url, Path(output_path), start, end, delay, logger=log)
+            payload = download_novel_payload(input_url, start, end, delay, logger=log)
 
             def done() -> None:
                 set_running(False)
-                if code == 0:
-                    messagebox.showinfo("完成", "下载完成，已生成 EPUB。")
-                else:
+                if payload is None:
                     messagebox.showerror("失败", "下载失败，请检查日志。")
+                    return
+
+                ok = open_editor(payload, output_path)
+                if not ok:
+                    log("❌ 已取消保存。")
+                    return
+                save_payload_to_epub(payload, Path(output_path), logger=log)
+                messagebox.showinfo("完成", "下载完成，已编辑并生成 EPUB。")
 
             root.after(0, done)
 
         Thread(target=worker, daemon=True).start()
 
-    ttk.Button(footer, text="开始下载", style="Accent.TButton", command=start_download).pack(side="left")
+    ttk.Button(footer, text="开始下载并编辑", style="Accent.TButton", command=start_download).pack(side="left")
     ttk.Button(footer, text="退出", command=root.destroy).pack(side="right")
 
     root.mainloop()
