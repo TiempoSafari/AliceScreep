@@ -1,6 +1,6 @@
 # AliceScreep
 
-用于下载 `https://www.alicesw.tw/` 小说并导出为 **EPUB**，支持图形界面（GUI）。
+用于下载 `https://www.alicesw.tw/` 小说并导出为 **EPUB**，支持图形界面（GUI），并提供更现代的 Windows 风格界面。
 
 ## 图形界面（推荐）
 
@@ -47,6 +47,7 @@ python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_273
 - 每章下载进度
 - ✅ 下载成功标记
 - ❌ 失败/警告标记（GUI 中会显示为红色）
+- 网络失败自动重试日志（默认重试 2 次）
 
 ## 常见问题
 
@@ -64,3 +65,10 @@ python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_273
 - 非法链接会直接跳过并在日志里输出具体章节 URL 和错误原因
 
 如果仍偶发失败，可把 `--delay` 调大一些（如 `0.8~1.5`），减少站点风控触发概率。
+
+
+## GUI 界面风格
+
+- 使用 `ttk` 主题组件，优先启用 `vista/xpnative`（可用时），更接近 Windows 新风格。
+- 增加顶部标题区、卡片式参数区、进度条和深色日志面板。
+- 日志颜色：成功绿色，失败/警告红色。

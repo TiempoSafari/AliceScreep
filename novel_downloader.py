@@ -92,6 +92,28 @@ def fetch_html(url: str, timeout: int = 30) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
+
+
+def fetch_html_with_retry(
+    url: str,
+    logger: Callable[[str], None] | None = None,
+    retries: int = 2,
+    wait_seconds: float = 0.8,
+) -> str:
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 2):
+        try:
+            return fetch_html(url)
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            last_exc = exc
+            if attempt > retries:
+                break
+            if logger:
+                logger(f"❌ [警告] 请求失败，准备重试({attempt}/{retries}): {url} | 错误: {exc}")
+            time.sleep(wait_seconds)
+
+    assert last_exc is not None
+    raise last_exc
 def sanitize_url(raw_url: str, base_url: str = "") -> Optional[str]:
     """清理并规范化 URL，避免被当作本地文件路径打开。"""
     candidate = html.unescape(raw_url or "").strip()
@@ -429,7 +451,7 @@ def build_epub(
 
 def download_chapters(
     chapters: Iterable[Chapter],
-    delay: float = 0.4,
+    delay: float = 0.2,
     logger: Callable[[str], None] = print,
 ) -> list[ChapterContent]:
     results: list[ChapterContent] = []
@@ -442,7 +464,7 @@ def download_chapters(
 
         logger(f"[{idx}] 下载中: {chapter.title} -> {chapter_url}")
         try:
-            chapter_html = fetch_html(chapter_url)
+            chapter_html = fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0)
         except (URLError, ValueError, OSError) as exc:
             logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
             continue
@@ -478,7 +500,7 @@ def run_download(
         chapter_index_url = input_url
 
     try:
-        index_html = fetch_html(chapter_index_url)
+        index_html = fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0)
     except URLError as exc:
         logger(f"❌ 目录页请求失败: {exc}")
         return 1
@@ -511,7 +533,7 @@ def run_download(
     novel_url = build_novel_url(input_url)
     if novel_url:
         try:
-            novel_html = fetch_html(novel_url)
+            novel_html = fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0)
             cover_url = extract_cover_url(novel_html, base_url=novel_url)
             if cover_url:
                 cover_bytes, cover_type, cover_name = fetch_cover_bytes(cover_url)
@@ -545,7 +567,7 @@ def parse_args() -> argparse.Namespace:
 def launch_gui() -> int:
     try:
         import tkinter as tk
-        from tkinter import filedialog, messagebox
+        from tkinter import filedialog, messagebox, ttk
         from tkinter.scrolledtext import ScrolledText
     except Exception as exc:
         print(f"GUI 启动失败：{exc}")
@@ -557,19 +579,39 @@ def launch_gui() -> int:
         print(f"GUI 启动失败：{exc}")
         return 1
 
-    root.title("AliceSW 小说下载器（EPUB）")
-    root.geometry("820x600")
+    root.title("AliceSW 小说下载器")
+    root.geometry("900x680")
+    root.configure(bg="#f4f6fb")
 
-    frame = tk.Frame(root, padx=12, pady=12)
-    frame.pack(fill="both", expand=True)
+    style = ttk.Style(root)
+    for theme in ("vista", "xpnative", "clam"):
+        if theme in style.theme_names():
+            style.theme_use(theme)
+            break
 
-    tk.Label(frame, text="小说链接").grid(row=0, column=0, sticky="w")
+    style.configure("Title.TLabel", font=("Segoe UI", 15, "bold"), foreground="#1f2a44")
+    style.configure("Sub.TLabel", font=("Segoe UI", 10), foreground="#5a6579")
+    style.configure("TButton", font=("Segoe UI", 10))
+    style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
+
+    container = ttk.Frame(root, padding=16)
+    container.pack(fill="both", expand=True)
+
+    header = ttk.Frame(container)
+    header.pack(fill="x", pady=(0, 8))
+    ttk.Label(header, text="AliceSW EPUB 下载器", style="Title.TLabel").pack(anchor="w")
+    ttk.Label(header, text="Windows 风格界面 | 支持章节过滤、重试、封面与元数据", style="Sub.TLabel").pack(anchor="w")
+
+    card = ttk.Frame(container, padding=12)
+    card.pack(fill="x", pady=(6, 8))
+
+    ttk.Label(card, text="小说链接").grid(row=0, column=0, sticky="w")
     url_var = tk.StringVar(value="https://www.alicesw.tw/novel/2735.html")
-    tk.Entry(frame, textvariable=url_var, width=78).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
+    ttk.Entry(card, textvariable=url_var, width=88).grid(row=0, column=1, columnspan=4, sticky="we", pady=4)
 
-    tk.Label(frame, text="输出文件").grid(row=1, column=0, sticky="w")
+    ttk.Label(card, text="输出文件").grid(row=1, column=0, sticky="w")
     output_var = tk.StringVar(value=str(Path.cwd() / "novel.epub"))
-    tk.Entry(frame, textvariable=output_var, width=58).grid(row=1, column=1, columnspan=2, sticky="we", pady=4)
+    ttk.Entry(card, textvariable=output_var, width=68).grid(row=1, column=1, columnspan=3, sticky="we", pady=4)
 
     def choose_output() -> None:
         path = filedialog.asksaveasfilename(
@@ -580,32 +622,40 @@ def launch_gui() -> int:
         if path:
             output_var.set(path)
 
-    tk.Button(frame, text="浏览", command=choose_output, width=10).grid(row=1, column=3, padx=6)
+    ttk.Button(card, text="浏览", command=choose_output).grid(row=1, column=4, padx=(6, 0))
 
-    tk.Label(frame, text="起始章节").grid(row=2, column=0, sticky="w")
+    ttk.Label(card, text="起始章节").grid(row=2, column=0, sticky="w")
     start_var = tk.StringVar(value="1")
-    tk.Entry(frame, textvariable=start_var, width=10).grid(row=2, column=1, sticky="w", pady=4)
+    ttk.Entry(card, textvariable=start_var, width=10).grid(row=2, column=1, sticky="w", pady=4)
 
-    tk.Label(frame, text="结束章节(0=最后)").grid(row=2, column=2, sticky="e")
+    ttk.Label(card, text="结束章节(0=最后)").grid(row=2, column=2, sticky="e")
     end_var = tk.StringVar(value="0")
-    tk.Entry(frame, textvariable=end_var, width=10).grid(row=2, column=3, sticky="w", pady=4)
+    ttk.Entry(card, textvariable=end_var, width=10).grid(row=2, column=3, sticky="w", pady=4)
 
-    tk.Label(frame, text="章节间隔秒").grid(row=3, column=0, sticky="w")
-    delay_var = tk.StringVar(value="0.2")
-    tk.Entry(frame, textvariable=delay_var, width=10).grid(row=3, column=1, sticky="w", pady=4)
+    ttk.Label(card, text="章节间隔(秒)").grid(row=2, column=4, sticky="e")
+    delay_var = tk.StringVar(value="0.5")
+    ttk.Entry(card, textvariable=delay_var, width=8).grid(row=2, column=5, sticky="w", padx=(6, 0), pady=4)
 
-    log_box = ScrolledText(frame, height=24)
-    log_box.grid(row=4, column=0, columnspan=4, sticky="nsew", pady=(10, 6))
-    log_box.tag_config("error", foreground="#d40000")
-    log_box.tag_config("success", foreground="#0a8f2a")
-    frame.rowconfigure(4, weight=1)
-    frame.columnconfigure(1, weight=1)
+    card.columnconfigure(1, weight=1)
+    card.columnconfigure(3, weight=1)
+
+    progress = ttk.Progressbar(container, mode="indeterminate")
+    progress.pack(fill="x", pady=(0, 8))
+
+    log_box = ScrolledText(container, height=24, font=("Consolas", 10), bg="#0f172a", fg="#e2e8f0", insertbackground="#e2e8f0")
+    log_box.pack(fill="both", expand=True, pady=(0, 10))
+    log_box.tag_config("error", foreground="#ff6b6b")
+    log_box.tag_config("success", foreground="#4ade80")
+    log_box.tag_config("info", foreground="#cbd5e1")
+
+    footer = ttk.Frame(container)
+    footer.pack(fill="x")
 
     downloading = {"active": False}
 
     def log(msg: str) -> None:
         def _append() -> None:
-            tag = None
+            tag = "info"
             if "❌" in msg or "[警告]" in msg:
                 tag = "error"
             elif "✅" in msg:
@@ -614,6 +664,13 @@ def launch_gui() -> int:
             log_box.see("end")
 
         root.after(0, _append)
+
+    def set_running(active: bool) -> None:
+        downloading["active"] = active
+        if active:
+            progress.start(10)
+        else:
+            progress.stop()
 
     def start_download() -> None:
         if downloading["active"]:
@@ -634,15 +691,16 @@ def launch_gui() -> int:
             messagebox.showerror("参数错误", "起始/结束章节必须是整数，间隔必须是数字。")
             return
 
-        downloading["active"] = True
+        set_running(True)
         log_box.delete("1.0", "end")
         log("开始下载 EPUB...")
+        log("提示：已开启失败重试机制，偶发网络抖动会自动重试。")
 
         def worker() -> None:
             code = run_download(input_url, Path(output_path), start, end, delay, logger=log)
 
             def done() -> None:
-                downloading["active"] = False
+                set_running(False)
                 if code == 0:
                     messagebox.showinfo("完成", "下载完成，已生成 EPUB。")
                 else:
@@ -652,8 +710,8 @@ def launch_gui() -> int:
 
         Thread(target=worker, daemon=True).start()
 
-    tk.Button(frame, text="开始下载", command=start_download, width=16).grid(row=5, column=0, sticky="w", pady=4)
-    tk.Button(frame, text="退出", command=root.destroy, width=12).grid(row=5, column=3, sticky="e", pady=4)
+    ttk.Button(footer, text="开始下载", style="Accent.TButton", command=start_download).pack(side="left")
+    ttk.Button(footer, text="退出", command=root.destroy).pack(side="right")
 
     root.mainloop()
     return 0
