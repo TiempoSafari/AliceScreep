@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Thread
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable, List, Optional
 from urllib.error import URLError
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 UA = (
@@ -28,6 +28,7 @@ UA = (
 class Chapter:
     title: str
     url: str
+    order: int = sys.maxsize
 
 
 class AnchorParser(HTMLParser):
@@ -109,97 +110,95 @@ def extract_content(page_html: str) -> str:
     return strip_tags(body.group(1))
 
 
-def chapter_sort_key(url: str) -> tuple[int, str]:
-    match = re.search(r"(\d+)(?=\.html(?:$|\?))", url)
-    if match:
-        return int(match.group(1)), url
-    return sys.maxsize, url
+def extract_chapter_order(title: str, url: str) -> int:
+    title_match = re.search(r"第\s*(\d+)\s*章", title)
+    if title_match:
+        return int(title_match.group(1))
+
+    url_match = re.search(r"(\d+)(?=\.html(?:$|\?))", url)
+    if url_match:
+        return int(url_match.group(1))
+    return sys.maxsize
 
 
-def extract_novel_id(index_url: str) -> str:
-    path = urlparse(index_url).path.strip("/")
-    if not path:
-        return ""
-    name = path.rsplit("/", 1)[-1]
-    if name.endswith(".html"):
-        name = name[:-5]
-    match = re.search(r"(\d+)", name)
-    return match.group(1) if match else ""
-
-
-def collect_candidate_links(index_url: str, html_text: str) -> list[tuple[str, str]]:
-    parser = AnchorParser()
-    parser.feed(html_text)
-    links = list(parser.links)
-
-    # 兼容 script/json 里的链接
-    script_patterns = (
-        r'(?:href|url)\s*[:=]\s*["\']([^"\']+\.html(?:\?[^"\']*)?)["\']',
-        r'["\'](\/[^"\']+\.html(?:\?[^"\']*)?)["\']',
-        r'["\'](https?:\/\/[^"\']+\.html(?:\?[^"\']*)?)["\']',
+def extract_novel_id(url: str) -> str:
+    path = urlparse(url).path
+    patterns = (
+        r"/novel/(\d+)\.html",
+        r"/other/chapters/id/(\d+)\.html",
     )
-    for pattern in script_patterns:
-        for href in re.findall(pattern, html_text, flags=re.IGNORECASE):
-            links.append((href, ""))
-
-    normalized: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for href, text in links:
-        href = html.unescape(href).replace("\\/", "/")
-        absolute_url = urljoin(index_url, href).split("#", 1)[0]
-        if absolute_url in seen:
-            continue
-        seen.add(absolute_url)
-        normalized.append((absolute_url, text.strip()))
-    return normalized
+    for pattern in patterns:
+        match = re.search(pattern, path)
+        if match:
+            return match.group(1)
+    return ""
 
 
-def looks_like_chapter_url(index_url: str, candidate_url: str, novel_id: str) -> bool:
-    index_parsed = urlparse(index_url)
-    parsed = urlparse(candidate_url)
-
-    if parsed.netloc and parsed.netloc != index_parsed.netloc:
-        return False
-
-    path = unquote(parsed.path)
-    if not path.lower().endswith(".html"):
-        return False
-
-    if path.rstrip("/") == index_parsed.path.rstrip("/"):
-        return False
-
-    if novel_id and f"/novel/{novel_id}/" in path:
-        return True
-
-    # 其它常见结构，只要路径里有小说 id 且是 html 即视为章节
-    if novel_id and novel_id in path and "/novel/" in path:
-        return True
-
-    filename = path.rsplit("/", 1)[-1].lower()
-    if re.search(r"(chapter|chap|\d+)", filename):
-        return True
-
-    return False
+def build_chapter_index_url(input_url: str) -> Optional[str]:
+    parsed = urlparse(input_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    novel_id = extract_novel_id(input_url)
+    if not novel_id:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/other/chapters/id/{novel_id}.html"
 
 
-def discover_chapters(index_url: str, html_text: str) -> List[Chapter]:
-    novel_id = extract_novel_id(index_url)
-    candidates = collect_candidate_links(index_url, html_text)
+def pick_chapter_list_html(page_html: str) -> str:
+    match = re.search(
+        r'<ul[^>]+class=["\'][^"\']*mulu_list[^"\']*["\'][^>]*>(.*?)</ul>',
+        page_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        return match.group(1)
+    return page_html
 
-    seen: set[str] = set()
+
+def discover_chapters(index_url: str, html_text: str, logger: Callable[[str], None] = print) -> List[Chapter]:
+    chapter_area = pick_chapter_list_html(html_text)
+    parser = AnchorParser()
+    parser.feed(chapter_area)
+
+    parsed_index = urlparse(index_url)
+    links_found = len(parser.links)
     chapters: list[Chapter] = []
+    seen: set[str] = set()
+    skipped_non_html = 0
+    skipped_cross_site = 0
+    skipped_non_book = 0
 
-    for absolute_url, text in candidates:
-        if not looks_like_chapter_url(index_url, absolute_url, novel_id):
+    for href, text in parser.links:
+        absolute_url = urljoin(index_url, html.unescape(href)).split("#", 1)[0]
+        parsed_abs = urlparse(absolute_url)
+
+        if parsed_abs.netloc and parsed_abs.netloc != parsed_index.netloc:
+            skipped_cross_site += 1
             continue
+        if not parsed_abs.path.lower().endswith(".html"):
+            skipped_non_html += 1
+            continue
+
+        # 强约束：章节页应在 /book/ 路径下，可避免抓到导航/分类/个人中心等页面
+        if "/book/" not in parsed_abs.path:
+            skipped_non_book += 1
+            continue
+
         if absolute_url in seen:
             continue
         seen.add(absolute_url)
-        parsed_abs = urlparse(absolute_url)
-        title = text or parsed_abs.path.rsplit("/", 1)[-1].replace(".html", "")
-        chapters.append(Chapter(title=title, url=absolute_url))
 
-    chapters.sort(key=lambda c: chapter_sort_key(c.url))
+        title = text.strip() or parsed_abs.path.rsplit("/", 1)[-1].replace(".html", "")
+        order = extract_chapter_order(title, absolute_url)
+        chapters.append(Chapter(title=title, url=absolute_url, order=order))
+
+    chapters.sort(key=lambda c: (c.order, c.url))
+    logger(
+        "章节解析完成："
+        f"候选链接 {links_found}，"
+        f"有效章节 {len(chapters)}，"
+        f"过滤(跨站={skipped_cross_site}, 非html={skipped_non_html}, 非/book/={skipped_non_book})"
+    )
     return chapters
 
 
@@ -236,23 +235,31 @@ def save_novel(
 
 
 def run_download(
-    index_url: str,
+    input_url: str,
     output_file: Path,
     start: int,
     end: int,
     delay: float,
     logger: Callable[[str], None] = print,
 ) -> int:
-    logger(f"读取目录页: {index_url}")
+    logger(f"输入链接: {input_url}")
+
+    chapter_index_url = build_chapter_index_url(input_url)
+    if chapter_index_url:
+        logger(f"使用章节目录页: {chapter_index_url}")
+    else:
+        logger("[警告] 无法自动识别小说ID，将直接使用输入链接作为目录页。")
+        chapter_index_url = input_url
+
     try:
-        index_html = fetch_html(index_url)
+        index_html = fetch_html(chapter_index_url)
     except URLError as exc:
         logger(f"目录页请求失败: {exc}")
         return 1
 
-    chapters = discover_chapters(index_url, index_html)
+    chapters = discover_chapters(chapter_index_url, index_html, logger=logger)
     if not chapters:
-        logger("未发现章节链接，请检查目录页结构或链接是否可访问。")
+        logger("未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
         return 1
 
     safe_start = max(start, 1)
@@ -263,14 +270,14 @@ def run_download(
         logger("筛选后没有章节，请检查起始章节/结束章节。")
         return 1
 
-    logger(f"发现 {len(chapters)} 章，准备下载 {len(selected)} 章。")
+    logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
     save_novel(selected, output_file, delay=max(delay, 0), logger=logger)
     return 0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="下载 alicesw 小说并导出成 txt")
-    parser.add_argument("index_url", nargs="?", help="小说目录页链接，例如 https://www.alicesw.tw/novel/19861.html")
+    parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html")
     parser.add_argument("-o", "--output", default="novel.txt", help="输出 txt 文件路径")
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")
@@ -300,8 +307,8 @@ def launch_gui() -> int:
     frame = tk.Frame(root, padx=12, pady=12)
     frame.pack(fill="both", expand=True)
 
-    tk.Label(frame, text="目录链接").grid(row=0, column=0, sticky="w")
-    url_var = tk.StringVar(value="https://www.alicesw.tw/novel/19861.html")
+    tk.Label(frame, text="小说链接").grid(row=0, column=0, sticky="w")
+    url_var = tk.StringVar(value="https://www.alicesw.tw/novel/2735.html")
     tk.Entry(frame, textvariable=url_var, width=72).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
 
     tk.Label(frame, text="输出文件").grid(row=1, column=0, sticky="w")
@@ -350,10 +357,10 @@ def launch_gui() -> int:
             messagebox.showinfo("提示", "下载正在进行中，请稍候。")
             return
 
-        url = url_var.get().strip()
+        input_url = url_var.get().strip()
         output_path = output_var.get().strip()
-        if not url or not output_path:
-            messagebox.showerror("参数错误", "请填写目录链接与输出文件路径。")
+        if not input_url or not output_path:
+            messagebox.showerror("参数错误", "请填写小说链接与输出文件路径。")
             return
 
         try:
@@ -369,7 +376,7 @@ def launch_gui() -> int:
         log("开始下载...")
 
         def worker() -> None:
-            code = run_download(url, Path(output_path), start, end, delay, logger=log)
+            code = run_download(input_url, Path(output_path), start, end, delay, logger=log)
 
             def done() -> None:
                 downloading["active"] = False
