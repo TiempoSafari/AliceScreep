@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Callable, Iterable, List
 from urllib.error import URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 UA = (
@@ -116,30 +116,87 @@ def chapter_sort_key(url: str) -> tuple[int, str]:
     return sys.maxsize, url
 
 
-def discover_chapters(index_url: str, html_text: str) -> List[Chapter]:
+def extract_novel_id(index_url: str) -> str:
+    path = urlparse(index_url).path.strip("/")
+    if not path:
+        return ""
+    name = path.rsplit("/", 1)[-1]
+    if name.endswith(".html"):
+        name = name[:-5]
+    match = re.search(r"(\d+)", name)
+    return match.group(1) if match else ""
+
+
+def collect_candidate_links(index_url: str, html_text: str) -> list[tuple[str, str]]:
     parser = AnchorParser()
     parser.feed(html_text)
+    links = list(parser.links)
 
-    parsed = urlparse(index_url)
-    novel_id = parsed.path.strip("/").split("/")[-1].replace(".html", "")
-    chapter_prefix = f"/novel/{novel_id}/"
+    # 兼容 script/json 里的链接
+    script_patterns = (
+        r'(?:href|url)\s*[:=]\s*["\']([^"\']+\.html(?:\?[^"\']*)?)["\']',
+        r'["\'](\/[^"\']+\.html(?:\?[^"\']*)?)["\']',
+        r'["\'](https?:\/\/[^"\']+\.html(?:\?[^"\']*)?)["\']',
+    )
+    for pattern in script_patterns:
+        for href in re.findall(pattern, html_text, flags=re.IGNORECASE):
+            links.append((href, ""))
+
+    normalized: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for href, text in links:
+        href = html.unescape(href).replace("\\/", "/")
+        absolute_url = urljoin(index_url, href).split("#", 1)[0]
+        if absolute_url in seen:
+            continue
+        seen.add(absolute_url)
+        normalized.append((absolute_url, text.strip()))
+    return normalized
+
+
+def looks_like_chapter_url(index_url: str, candidate_url: str, novel_id: str) -> bool:
+    index_parsed = urlparse(index_url)
+    parsed = urlparse(candidate_url)
+
+    if parsed.netloc and parsed.netloc != index_parsed.netloc:
+        return False
+
+    path = unquote(parsed.path)
+    if not path.lower().endswith(".html"):
+        return False
+
+    if path.rstrip("/") == index_parsed.path.rstrip("/"):
+        return False
+
+    if novel_id and f"/novel/{novel_id}/" in path:
+        return True
+
+    # 其它常见结构，只要路径里有小说 id 且是 html 即视为章节
+    if novel_id and novel_id in path and "/novel/" in path:
+        return True
+
+    filename = path.rsplit("/", 1)[-1].lower()
+    if re.search(r"(chapter|chap|\d+)", filename):
+        return True
+
+    return False
+
+
+def discover_chapters(index_url: str, html_text: str) -> List[Chapter]:
+    novel_id = extract_novel_id(index_url)
+    candidates = collect_candidate_links(index_url, html_text)
 
     seen: set[str] = set()
     chapters: list[Chapter] = []
 
-    for href, text in parser.links:
-        absolute_url = urljoin(index_url, href)
-        parsed_abs = urlparse(absolute_url)
-        if parsed_abs.netloc != parsed.netloc:
-            continue
-        if not parsed_abs.path.startswith(chapter_prefix):
-            continue
-        if not parsed_abs.path.endswith(".html"):
+    for absolute_url, text in candidates:
+        if not looks_like_chapter_url(index_url, absolute_url, novel_id):
             continue
         if absolute_url in seen:
             continue
         seen.add(absolute_url)
-        title = text.strip() or parsed_abs.path.rsplit("/", 1)[-1].replace(".html", "")
+        parsed_abs = urlparse(absolute_url)
+        title = text or parsed_abs.path.rsplit("/", 1)[-1].replace(".html", "")
         chapters.append(Chapter(title=title, url=absolute_url))
 
     chapters.sort(key=lambda c: chapter_sort_key(c.url))
