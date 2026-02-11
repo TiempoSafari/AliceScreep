@@ -141,6 +141,26 @@ def strip_tags(content_html: str) -> str:
     return text.strip()
 
 
+
+
+def normalize_chapter_title(raw_title: str) -> str:
+    title = html.unescape((raw_title or "").strip())
+    if not title:
+        return "未知章节"
+
+    # 站点常见尾巴："_...-愛麗絲書屋 (ALICESW.COM) - ..."
+    title = re.sub(r"[\s_\-]*(?:愛麗絲書屋|ALICESW\.COM).*$", "", title, flags=re.IGNORECASE)
+
+    # 常见模式："章节名_副标题"，优先保留章节主标题
+    if "_" in title:
+        left, right = title.split("_", 1)
+        if re.search(r"第\s*\d+\s*章", left) and len(right) > 3:
+            title = left
+
+    title = re.sub(r"\s+", " ", title).strip(" _-")
+    return title or "未知章节"
+
+
 def extract_title(page_html: str) -> str:
     for pattern in (r"<h1[^>]*>(.*?)</h1>", r"<title[^>]*>(.*?)</title>"):
         match = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
@@ -469,7 +489,11 @@ def download_chapters(
             logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
             continue
 
-        title = extract_title(chapter_html)
+        page_title = extract_title(chapter_html)
+        title = normalize_chapter_title(chapter.title or page_title)
+        if title == "未知章节":
+            title = normalize_chapter_title(page_title)
+
         content = extract_content(chapter_html)
         if not content:
             logger(f"❌ [警告] 正文提取失败，已跳过: {chapter_url}")

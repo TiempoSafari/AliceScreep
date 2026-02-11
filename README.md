@@ -33,6 +33,7 @@ python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_273
 
 生成的 EPUB 包含：
 
+- 自动清理章节标题里的站点后缀（如 `-愛麗絲書屋...`），保留纯净章节名
 - 章节目录（TOC）
 - 每章独立标题和正文
 - 作品元数据（标题、作者、语言、时间）
