@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Callable, Iterable, List, Optional
 from urllib.error import URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 UA = (
@@ -69,6 +69,25 @@ def fetch_html(url: str, timeout: int = 30) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="ignore")
+
+
+def sanitize_url(raw_url: str, base_url: str = "") -> Optional[str]:
+    """清理并规范化 URL，避免被当作本地文件路径打开。"""
+    candidate = html.unescape(raw_url or "").strip()
+    if not candidate:
+        return None
+
+    if base_url:
+        candidate = urljoin(base_url, candidate)
+
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    # 防止章节 URL 中出现未转义空格或中文导致请求失败
+    path = quote(unquote(parsed.path), safe="/%:@-._~!$&'()*+,;=")
+    query = quote(unquote(parsed.query), safe="=&/%:@-._~!$'()*+,;?")
+    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, query, ""))
 
 
 def strip_tags(content_html: str) -> str:
@@ -169,7 +188,12 @@ def discover_chapters(index_url: str, html_text: str, logger: Callable[[str], No
     skipped_non_book = 0
 
     for href, text in parser.links:
-        absolute_url = urljoin(index_url, html.unescape(href)).split("#", 1)[0]
+        normalized = sanitize_url(href, base_url=index_url)
+        if not normalized:
+            skipped_non_html += 1
+            continue
+
+        absolute_url = normalized.split("#", 1)[0]
         parsed_abs = urlparse(absolute_url)
 
         if parsed_abs.netloc and parsed_abs.netloc != parsed_index.netloc:
@@ -212,11 +236,16 @@ def save_novel(
     count = 0
     with output_file.open("w", encoding="utf-8") as file_obj:
         for idx, chapter in enumerate(chapters, start=1):
-            logger(f"[{idx}] 下载 {chapter.title} -> {chapter.url}")
+            chapter_url = sanitize_url(chapter.url)
+            if not chapter_url:
+                logger(f"[警告] 跳过非法章节链接: {chapter.url}")
+                continue
+
+            logger(f"[{idx}] 下载 {chapter.title} -> {chapter_url}")
             try:
-                chapter_html = fetch_html(chapter.url)
-            except URLError as exc:
-                logger(f"[警告] 章节下载失败，已跳过: {exc}")
+                chapter_html = fetch_html(chapter_url)
+            except (URLError, ValueError, OSError) as exc:
+                logger(f"[警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
                 continue
             title = extract_title(chapter_html)
             content = extract_content(chapter_html)
