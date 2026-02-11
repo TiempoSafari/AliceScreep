@@ -1,6 +1,6 @@
 # AliceScreep
 
-用于下载 `https://www.alicesw.tw/` 小说并导出为 TXT，支持图形界面（GUI）。
+用于下载 `https://www.alicesw.tw/` 小说并导出为 **EPUB**，支持图形界面（GUI）。
 
 ## 图形界面（推荐）
 
@@ -26,8 +26,17 @@ python novel_downloader.py
 ## 命令行模式（可选）
 
 ```bash
-python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_2735.txt --start 1 --end 20 --delay 0.5
+python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_2735.epub --start 1 --end 20 --delay 0.5
 ```
+
+## EPUB 说明
+
+生成的 EPUB 包含：
+
+- 章节目录（TOC）
+- 每章独立标题和正文
+- 作品元数据（标题、作者、语言、时间）
+- 自动尝试抓取封面图（抓取失败时会生成无封面 EPUB）
 
 ## 日志说明
 
@@ -35,9 +44,9 @@ python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_273
 
 - 实际使用的章节目录页 URL
 - 章节解析统计（候选链接、有效章节、各类过滤数量）
-- 每章下载进度与最终写入章节数
-
-> 注意：网站结构变更后，可能需要更新章节/正文提取规则。
+- 每章下载进度
+- ✅ 下载成功标记
+- ❌ 失败/警告标记（GUI 中会显示为红色）
 
 ## 常见问题
 

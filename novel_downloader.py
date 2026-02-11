@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载 alicesw 小说目录并导出为 txt（含 GUI）。"""
+"""下载 alicesw 小说目录并导出为 EPUB（含 GUI）。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ import html
 import re
 import sys
 import time
+import uuid
+import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Thread
@@ -29,6 +32,20 @@ class Chapter:
     title: str
     url: str
     order: int = sys.maxsize
+
+
+@dataclass
+class ChapterContent:
+    title: str
+    content: str
+    source_url: str
+
+
+@dataclass
+class NovelMeta:
+    title: str
+    author: str
+    language: str = "zh-Hant"
 
 
 class AnchorParser(HTMLParser):
@@ -59,10 +76,14 @@ class AnchorParser(HTMLParser):
         self._text_parts = []
 
 
-def fetch_html(url: str, timeout: int = 30) -> str:
+def fetch_bytes(url: str, timeout: int = 30) -> bytes:
     req = Request(url, headers={"User-Agent": UA})
     with urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
+        return resp.read()
+
+
+def fetch_html(url: str, timeout: int = 30) -> str:
+    raw = fetch_bytes(url, timeout=timeout)
     for encoding in ("utf-8", "gb18030", "big5"):
         try:
             return raw.decode(encoding)
@@ -84,7 +105,6 @@ def sanitize_url(raw_url: str, base_url: str = "") -> Optional[str]:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
 
-    # 防止章节 URL 中出现未转义空格或中文导致请求失败
     path = quote(unquote(parsed.path), safe="/%:@-._~!$&'()*+,;=")
     query = quote(unquote(parsed.query), safe="=&/%:@-._~!$'()*+,;?")
     return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, query, ""))
@@ -100,10 +120,7 @@ def strip_tags(content_html: str) -> str:
 
 
 def extract_title(page_html: str) -> str:
-    for pattern in (
-        r"<h1[^>]*>(.*?)</h1>",
-        r"<title[^>]*>(.*?)</title>",
-    ):
+    for pattern in (r"<h1[^>]*>(.*?)</h1>", r"<title[^>]*>(.*?)</title>"):
         match = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
         if match:
             return strip_tags(match.group(1))
@@ -142,10 +159,7 @@ def extract_chapter_order(title: str, url: str) -> int:
 
 def extract_novel_id(url: str) -> str:
     path = urlparse(url).path
-    patterns = (
-        r"/novel/(\d+)\.html",
-        r"/other/chapters/id/(\d+)\.html",
-    )
+    patterns = (r"/novel/(\d+)\.html", r"/other/chapters/id/(\d+)\.html")
     for pattern in patterns:
         match = re.search(pattern, path)
         if match:
@@ -161,6 +175,16 @@ def build_chapter_index_url(input_url: str) -> Optional[str]:
     if not novel_id:
         return None
     return f"{parsed.scheme}://{parsed.netloc}/other/chapters/id/{novel_id}.html"
+
+
+def build_novel_url(input_url: str) -> Optional[str]:
+    parsed = urlparse(input_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    novel_id = extract_novel_id(input_url)
+    if not novel_id:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/novel/{novel_id}.html"
 
 
 def pick_chapter_list_html(page_html: str) -> str:
@@ -202,8 +226,6 @@ def discover_chapters(index_url: str, html_text: str, logger: Callable[[str], No
         if not parsed_abs.path.lower().endswith(".html"):
             skipped_non_html += 1
             continue
-
-        # 强约束：章节页应在 /book/ 路径下，可避免抓到导航/分类/个人中心等页面
         if "/book/" not in parsed_abs.path:
             skipped_non_book += 1
             continue
@@ -226,41 +248,216 @@ def discover_chapters(index_url: str, html_text: str, logger: Callable[[str], No
     return chapters
 
 
-def save_novel(
-    chapters: Iterable[Chapter],
+def extract_meta(index_html: str, fallback_title: str = "未命名小说") -> NovelMeta:
+    title = fallback_title
+    author = "未知作者"
+
+    title_match = re.search(r"<div[^>]+class=[\"']mu_h1[\"'][^>]*>\s*<h1[^>]*>(.*?)</h1>", index_html, re.I | re.S)
+    if title_match:
+        title = strip_tags(title_match.group(1))
+    else:
+        title = extract_title(index_html)
+
+    author_match = re.search(r"作者：\s*<a[^>]*>(.*?)</a>", index_html, re.I | re.S)
+    if author_match:
+        author = strip_tags(author_match.group(1))
+
+    return NovelMeta(title=title or fallback_title, author=author or "未知作者")
+
+
+def extract_cover_url(page_html: str, base_url: str) -> Optional[str]:
+    patterns = (
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<img[^>]+class=["\'][^"\']*(?:book|cover|pic)[^"\']*["\'][^>]+src=["\']([^"\']+)["\']',
+        r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>',
+    )
+    for pattern in patterns:
+        m = re.search(pattern, page_html, re.I | re.S)
+        if not m:
+            continue
+        normalized = sanitize_url(m.group(1), base_url=base_url)
+        if normalized:
+            return normalized
+    return None
+
+
+def fetch_cover_bytes(cover_url: str) -> tuple[bytes, str, str]:
+    data = fetch_bytes(cover_url)
+    lower = cover_url.lower()
+    if lower.endswith(".png"):
+        return data, "image/png", "cover.png"
+    return data, "image/jpeg", "cover.jpg"
+
+
+def to_xhtml_paragraphs(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines()]
+    paragraphs = [line for line in lines if line]
+    if not paragraphs:
+        return "<p></p>"
+    return "\n".join(f"<p>{html.escape(p)}</p>" for p in paragraphs)
+
+
+def build_epub(
     output_file: Path,
+    meta: NovelMeta,
+    chapters: list[ChapterContent],
+    cover_bytes: bytes | None,
+    cover_media_type: str | None,
+    cover_name: str | None,
+) -> None:
+    book_id = f"urn:uuid:{uuid.uuid4()}"
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    manifest_items: list[str] = [
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+    ]
+    spine_items: list[str] = []
+    nav_points: list[str] = []
+    nav_links: list[str] = []
+
+    if cover_bytes and cover_media_type and cover_name:
+        manifest_items.append(
+            f'<item id="cover-image" href="images/{cover_name}" media-type="{cover_media_type}" properties="cover-image"/>'
+        )
+        manifest_items.append('<item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml"/>')
+        spine_items.append('<itemref idref="cover-page"/>')
+
+    for idx, _chapter in enumerate(chapters, start=1):
+        manifest_items.append(f'<item id="chap{idx}" href="text/chapter{idx}.xhtml" media-type="application/xhtml+xml"/>')
+        spine_items.append(f'<itemref idref="chap{idx}"/>')
+        nav_points.append(
+            f'''<navPoint id="navPoint-{idx}" playOrder="{idx}">
+      <navLabel><text>{html.escape(chapters[idx-1].title)}</text></navLabel>
+      <content src="text/chapter{idx}.xhtml"/>
+    </navPoint>'''
+        )
+        nav_links.append(f'<li><a href="text/chapter{idx}.xhtml">{html.escape(chapters[idx-1].title)}</a></li>')
+
+    opf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">{book_id}</dc:identifier>
+    <dc:title>{html.escape(meta.title)}</dc:title>
+    <dc:creator>{html.escape(meta.author)}</dc:creator>
+    <dc:language>{meta.language}</dc:language>
+    <dc:date>{now_iso}</dc:date>
+    <meta property="dcterms:modified">{now_iso}</meta>
+  </metadata>
+  <manifest>
+    {''.join(manifest_items)}
+  </manifest>
+  <spine toc="ncx">
+    {''.join(spine_items)}
+  </spine>
+</package>
+'''
+
+    toc_ncx = f'''<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head>
+    <meta name="dtb:uid" content="{book_id}"/>
+    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
+  </head>
+  <docTitle><text>{html.escape(meta.title)}</text></docTitle>
+  <navMap>
+    {''.join(nav_points)}
+  </navMap>
+</ncx>
+'''
+
+    nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="zh-Hant">
+<head><title>目录</title></head>
+<body>
+  <nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops">
+    <h1>{html.escape(meta.title)}</h1>
+    <ol>
+      {''.join(nav_links)}
+    </ol>
+  </nav>
+</body>
+</html>
+'''
+
+    with zipfile.ZipFile(output_file, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr(
+            "META-INF/container.xml",
+            """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">
+  <rootfiles>
+    <rootfile full-path=\"OEBPS/content.opf\" media-type=\"application/oebps-package+xml\"/>
+  </rootfiles>
+</container>
+""",
+        )
+
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/toc.ncx", toc_ncx)
+        zf.writestr("OEBPS/nav.xhtml", nav_xhtml)
+
+        if cover_bytes and cover_media_type and cover_name:
+            cover_page = f'''<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>封面</title></head>
+<body>
+  <div style="text-align:center; margin:0; padding:0;">
+    <img src="images/{cover_name}" alt="cover" style="max-width:100%; height:auto;"/>
+  </div>
+</body>
+</html>
+'''
+            zf.writestr("OEBPS/cover.xhtml", cover_page)
+            zf.writestr(f"OEBPS/images/{cover_name}", cover_bytes)
+
+        for idx, chapter in enumerate(chapters, start=1):
+            chapter_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="zh-Hant">
+<head><title>{html.escape(chapter.title)}</title></head>
+<body>
+  <h1>{html.escape(chapter.title)}</h1>
+  {to_xhtml_paragraphs(chapter.content)}
+</body>
+</html>
+'''
+            zf.writestr(f"OEBPS/text/chapter{idx}.xhtml", chapter_xhtml)
+
+
+def download_chapters(
+    chapters: Iterable[Chapter],
     delay: float = 0.2,
     logger: Callable[[str], None] = print,
-) -> int:
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    with output_file.open("w", encoding="utf-8") as file_obj:
-        for idx, chapter in enumerate(chapters, start=1):
-            chapter_url = sanitize_url(chapter.url)
-            if not chapter_url:
-                logger(f"[警告] 跳过非法章节链接: {chapter.url}")
-                continue
+) -> list[ChapterContent]:
+    results: list[ChapterContent] = []
 
-            logger(f"[{idx}] 下载 {chapter.title} -> {chapter_url}")
-            try:
-                chapter_html = fetch_html(chapter_url)
-            except (URLError, ValueError, OSError) as exc:
-                logger(f"[警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
-                continue
-            title = extract_title(chapter_html)
-            content = extract_content(chapter_html)
-            if not content:
-                content = "[警告] 未能提取正文。"
+    for idx, chapter in enumerate(chapters, start=1):
+        chapter_url = sanitize_url(chapter.url)
+        if not chapter_url:
+            logger(f"❌ [警告] 跳过非法章节链接: {chapter.url}")
+            continue
 
-            file_obj.write(f"{title}\n")
-            file_obj.write("=" * len(title) + "\n\n")
-            file_obj.write(content)
-            file_obj.write("\n\n\n")
-            count += 1
-            time.sleep(delay)
+        logger(f"[{idx}] 下载中: {chapter.title} -> {chapter_url}")
+        try:
+            chapter_html = fetch_html(chapter_url)
+        except (URLError, ValueError, OSError) as exc:
+            logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
+            continue
 
-    logger(f"完成：共写入 {count} 章 -> {output_file}")
-    return count
+        title = extract_title(chapter_html)
+        content = extract_content(chapter_html)
+        if not content:
+            logger(f"❌ [警告] 正文提取失败，已跳过: {chapter_url}")
+            continue
+
+        results.append(ChapterContent(title=title, content=content, source_url=chapter_url))
+        logger(f"✅ 下载成功: {title}")
+        time.sleep(delay)
+
+    return results
 
 
 def run_download(
@@ -277,18 +474,21 @@ def run_download(
     if chapter_index_url:
         logger(f"使用章节目录页: {chapter_index_url}")
     else:
-        logger("[警告] 无法自动识别小说ID，将直接使用输入链接作为目录页。")
+        logger("❌ [警告] 无法自动识别小说ID，将直接使用输入链接作为目录页。")
         chapter_index_url = input_url
 
     try:
         index_html = fetch_html(chapter_index_url)
     except URLError as exc:
-        logger(f"目录页请求失败: {exc}")
+        logger(f"❌ 目录页请求失败: {exc}")
         return 1
+
+    meta = extract_meta(index_html)
+    logger(f"小说信息: 标题={meta.title} | 作者={meta.author}")
 
     chapters = discover_chapters(chapter_index_url, index_html, logger=logger)
     if not chapters:
-        logger("未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
+        logger("❌ 未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
         return 1
 
     safe_start = max(start, 1)
@@ -296,18 +496,45 @@ def run_download(
     selected = chapters[safe_start - 1 : safe_end]
 
     if not selected:
-        logger("筛选后没有章节，请检查起始章节/结束章节。")
+        logger("❌ 筛选后没有章节，请检查起始章节/结束章节。")
         return 1
 
     logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
-    save_novel(selected, output_file, delay=max(delay, 0), logger=logger)
+    downloaded = download_chapters(selected, delay=max(delay, 0), logger=logger)
+    if not downloaded:
+        logger("❌ 没有成功下载任何章节，未生成 EPUB。")
+        return 1
+
+    cover_bytes = None
+    cover_type = None
+    cover_name = None
+    novel_url = build_novel_url(input_url)
+    if novel_url:
+        try:
+            novel_html = fetch_html(novel_url)
+            cover_url = extract_cover_url(novel_html, base_url=novel_url)
+            if cover_url:
+                cover_bytes, cover_type, cover_name = fetch_cover_bytes(cover_url)
+                logger(f"✅ 已获取封面图: {cover_url}")
+            else:
+                logger("❌ [警告] 未找到封面图，将生成无封面 EPUB。")
+        except Exception as exc:
+            logger(f"❌ [警告] 获取封面失败，将生成无封面 EPUB: {exc}")
+
+    if output_file.suffix.lower() != ".epub":
+        output_file = output_file.with_suffix(".epub")
+        logger(f"输出格式已切换为 EPUB: {output_file}")
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    build_epub(output_file, meta, downloaded, cover_bytes, cover_type, cover_name)
+    logger(f"✅ 完成：共写入 {len(downloaded)} 章 -> {output_file}")
     return 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="下载 alicesw 小说并导出成 txt")
+    parser = argparse.ArgumentParser(description="下载 alicesw 小说并导出成 EPUB")
     parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html")
-    parser.add_argument("-o", "--output", default="novel.txt", help="输出 txt 文件路径")
+    parser.add_argument("-o", "--output", default="novel.epub", help="输出 EPUB 文件路径")
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")
     parser.add_argument("--end", type=int, default=0, help="结束章节（0 表示到最后）")
@@ -330,25 +557,25 @@ def launch_gui() -> int:
         print(f"GUI 启动失败：{exc}")
         return 1
 
-    root.title("AliceSW 小说下载器")
-    root.geometry("760x560")
+    root.title("AliceSW 小说下载器（EPUB）")
+    root.geometry("820x600")
 
     frame = tk.Frame(root, padx=12, pady=12)
     frame.pack(fill="both", expand=True)
 
     tk.Label(frame, text="小说链接").grid(row=0, column=0, sticky="w")
     url_var = tk.StringVar(value="https://www.alicesw.tw/novel/2735.html")
-    tk.Entry(frame, textvariable=url_var, width=72).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
+    tk.Entry(frame, textvariable=url_var, width=78).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
 
     tk.Label(frame, text="输出文件").grid(row=1, column=0, sticky="w")
-    output_var = tk.StringVar(value=str(Path.cwd() / "novel.txt"))
+    output_var = tk.StringVar(value=str(Path.cwd() / "novel.epub"))
     tk.Entry(frame, textvariable=output_var, width=58).grid(row=1, column=1, columnspan=2, sticky="we", pady=4)
 
     def choose_output() -> None:
         path = filedialog.asksaveasfilename(
-            title="选择输出 TXT 文件",
-            defaultextension=".txt",
-            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+            title="选择输出 EPUB 文件",
+            defaultextension=".epub",
+            filetypes=[("EPUB", "*.epub"), ("All files", "*.*")],
         )
         if path:
             output_var.set(path)
@@ -367,8 +594,10 @@ def launch_gui() -> int:
     delay_var = tk.StringVar(value="0.2")
     tk.Entry(frame, textvariable=delay_var, width=10).grid(row=3, column=1, sticky="w", pady=4)
 
-    log_box = ScrolledText(frame, height=22)
+    log_box = ScrolledText(frame, height=24)
     log_box.grid(row=4, column=0, columnspan=4, sticky="nsew", pady=(10, 6))
+    log_box.tag_config("error", foreground="#d40000")
+    log_box.tag_config("success", foreground="#0a8f2a")
     frame.rowconfigure(4, weight=1)
     frame.columnconfigure(1, weight=1)
 
@@ -376,7 +605,12 @@ def launch_gui() -> int:
 
     def log(msg: str) -> None:
         def _append() -> None:
-            log_box.insert("end", msg + "\n")
+            tag = None
+            if "❌" in msg or "[警告]" in msg:
+                tag = "error"
+            elif "✅" in msg:
+                tag = "success"
+            log_box.insert("end", msg + "\n", tag)
             log_box.see("end")
 
         root.after(0, _append)
@@ -402,7 +636,7 @@ def launch_gui() -> int:
 
         downloading["active"] = True
         log_box.delete("1.0", "end")
-        log("开始下载...")
+        log("开始下载 EPUB...")
 
         def worker() -> None:
             code = run_download(input_url, Path(output_path), start, end, delay, logger=log)
@@ -410,7 +644,7 @@ def launch_gui() -> int:
             def done() -> None:
                 downloading["active"] = False
                 if code == 0:
-                    messagebox.showinfo("完成", "下载完成。")
+                    messagebox.showinfo("完成", "下载完成，已生成 EPUB。")
                 else:
                     messagebox.showerror("失败", "下载失败，请检查日志。")
 
