@@ -429,7 +429,7 @@ def build_epub(
 
 def download_chapters(
     chapters: Iterable[Chapter],
-    delay: float = 0.2,
+    delay: float = 0.4,
     logger: Callable[[str], None] = print,
 ) -> list[ChapterContent]:
     results: list[ChapterContent] = []
