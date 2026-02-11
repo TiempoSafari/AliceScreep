@@ -20,6 +20,33 @@ from urllib.error import URLError
 from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+try:
+    from opencc import OpenCC
+except Exception:  # optional dependency
+    OpenCC = None
+
+
+class OpenCCConverter:
+    def __init__(self) -> None:
+        self._converter = None
+        if OpenCC is not None:
+            try:
+                self._converter = OpenCC("t2s")
+            except Exception:
+                self._converter = None
+
+    @property
+    def available(self) -> bool:
+        return self._converter is not None
+
+    def convert(self, text: str) -> str:
+        if not self._converter:
+            return text
+        return self._converter.convert(text)
+
+
+OPENCC = OpenCCConverter()
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -478,10 +505,17 @@ def build_epub(
             zf.writestr(f"OEBPS/text/chapter{idx}.xhtml", chapter_xhtml)
 
 
+def maybe_convert_to_simplified(text: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return OPENCC.convert(text)
+
+
 def download_chapters(
     chapters: Iterable[Chapter],
     delay: float = 0.2,
     logger: Callable[[str], None] = print,
+    to_simplified: bool = True,
 ) -> list[ChapterContent]:
     results: list[ChapterContent] = []
 
@@ -508,6 +542,9 @@ def download_chapters(
             logger(f"❌ [警告] 正文提取失败，已跳过: {chapter_url}")
             continue
 
+        title = maybe_convert_to_simplified(title, to_simplified)
+        content = maybe_convert_to_simplified(content, to_simplified)
+
         results.append(ChapterContent(title=title, content=content, source_url=chapter_url))
         logger(f"✅ 下载成功: {title}")
         time.sleep(delay)
@@ -521,6 +558,7 @@ def download_novel_payload(
     end: int,
     delay: float,
     logger: Callable[[str], None] = print,
+    to_simplified: bool = True,
 ) -> DownloadPayload | None:
     logger(f"输入链接: {input_url}")
 
@@ -539,6 +577,11 @@ def download_novel_payload(
 
     meta = extract_meta(index_html)
     logger(f"小说信息: 标题={meta.title} | 作者={meta.author}")
+    if to_simplified:
+        if OPENCC.available:
+            logger("✅ 已启用繁体转简体（OpenCC t2s）")
+        else:
+            logger("❌ [警告] 未安装 opencc，暂无法自动繁转简（可 `pip install opencc-python-reimplemented`）")
 
     chapters = discover_chapters(chapter_index_url, index_html, logger=logger)
     if not chapters:
@@ -554,7 +597,7 @@ def download_novel_payload(
         return None
 
     logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
-    downloaded = download_chapters(selected, delay=max(delay, 0), logger=logger)
+    downloaded = download_chapters(selected, delay=max(delay, 0), logger=logger, to_simplified=to_simplified)
     if not downloaded:
         logger("❌ 没有成功下载任何章节，未生成 EPUB。")
         return None
@@ -574,6 +617,10 @@ def download_novel_payload(
                 logger("❌ [警告] 未找到封面图，将生成无封面 EPUB。")
         except Exception as exc:
             logger(f"❌ [警告] 获取封面失败，将生成无封面 EPUB: {exc}")
+
+    if to_simplified:
+        meta.title = maybe_convert_to_simplified(meta.title, True)
+        meta.author = maybe_convert_to_simplified(meta.author, True)
 
     return DownloadPayload(
         meta=meta,
@@ -613,8 +660,9 @@ def run_download(
     end: int,
     delay: float,
     logger: Callable[[str], None] = print,
+    to_simplified: bool = True,
 ) -> int:
-    payload = download_novel_payload(input_url, start, end, delay, logger=logger)
+    payload = download_novel_payload(input_url, start, end, delay, logger=logger, to_simplified=to_simplified)
     if payload is None:
         return 1
     return save_payload_to_epub(payload, output_file, logger=logger)
@@ -627,6 +675,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")
     parser.add_argument("--end", type=int, default=0, help="结束章节（0 表示到最后）")
+    parser.add_argument("--no-simplified", action="store_true", help="关闭繁体转简体（默认开启）")
     parser.add_argument("--gui", action="store_true", help="启动图形界面")
     return parser.parse_args()
 
@@ -702,6 +751,9 @@ def launch_gui() -> int:
     ttk.Label(card, text="章节间隔(秒)").grid(row=2, column=4, sticky="e")
     delay_var = tk.StringVar(value="0.5")
     ttk.Entry(card, textvariable=delay_var, width=8).grid(row=2, column=5, sticky="w", padx=(6, 0), pady=4)
+
+    simplified_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(card, text="保存前繁体转简体", variable=simplified_var).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     card.columnconfigure(1, weight=1)
     card.columnconfigure(3, weight=1)
@@ -873,7 +925,14 @@ def launch_gui() -> int:
         log("提示：下载完成后会进入“编辑章节/封面”界面。")
 
         def worker() -> None:
-            payload = download_novel_payload(input_url, start, end, delay, logger=log)
+            payload = download_novel_payload(
+                input_url,
+                start,
+                end,
+                delay,
+                logger=log,
+                to_simplified=bool(simplified_var.get()),
+            )
 
             def done() -> None:
                 set_running(False)
@@ -903,7 +962,7 @@ def main() -> int:
     args = parse_args()
     if args.gui or not args.index_url:
         return launch_gui()
-    return run_download(args.index_url, Path(args.output), args.start, args.end, args.delay)
+    return run_download(args.index_url, Path(args.output), args.start, args.end, args.delay, to_simplified=not args.no_simplified)
 
 
 if __name__ == "__main__":
