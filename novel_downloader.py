@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载 alicesw 小说目录并导出为 txt。"""
+"""下载 alicesw 小说目录并导出为 txt（含 GUI）。"""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable, List
-from urllib.parse import urljoin, urlparse
+from threading import Thread
+from typing import Callable, Iterable, List
 from urllib.error import URLError
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
-
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -71,8 +71,8 @@ def fetch_html(url: str, timeout: int = 30) -> str:
 
 
 def strip_tags(content_html: str) -> str:
-    content_html = re.sub(r"<br\\s*/?>", "\n", content_html, flags=re.IGNORECASE)
-    content_html = re.sub(r"</p\\s*>", "\n\n", content_html, flags=re.IGNORECASE)
+    content_html = re.sub(r"<br\s*/?>", "\n", content_html, flags=re.IGNORECASE)
+    content_html = re.sub(r"</p\s*>", "\n\n", content_html, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", content_html)
     text = html.unescape(text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -84,9 +84,9 @@ def extract_title(page_html: str) -> str:
         r"<h1[^>]*>(.*?)</h1>",
         r"<title[^>]*>(.*?)</title>",
     ):
-        m = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            return strip_tags(m.group(1))
+        match = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return strip_tags(match.group(1))
     return "未知标题"
 
 
@@ -97,9 +97,9 @@ def extract_content(page_html: str) -> str:
         r'<article[^>]*>(.*?)</article>',
     )
     for pattern in patterns:
-        m = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
-        if m:
-            text = strip_tags(m.group(1))
+        match = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            text = strip_tags(match.group(1))
             if len(text) > 60:
                 return text
 
@@ -121,7 +121,8 @@ def discover_chapters(index_url: str, html_text: str) -> List[Chapter]:
     parser.feed(html_text)
 
     parsed = urlparse(index_url)
-    chapter_prefix = f"/novel/{parsed.path.strip('/').split('/')[-1].replace('.html', '')}/"
+    novel_id = parsed.path.strip("/").split("/")[-1].replace(".html", "")
+    chapter_prefix = f"/novel/{novel_id}/"
 
     seen: set[str] = set()
     chapters: list[Chapter] = []
@@ -145,67 +146,197 @@ def discover_chapters(index_url: str, html_text: str) -> List[Chapter]:
     return chapters
 
 
-def save_novel(chapters: Iterable[Chapter], output_file: Path, delay: float = 0.2) -> None:
+def save_novel(
+    chapters: Iterable[Chapter],
+    output_file: Path,
+    delay: float = 0.2,
+    logger: Callable[[str], None] = print,
+) -> int:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     count = 0
-    with output_file.open("w", encoding="utf-8") as f:
+    with output_file.open("w", encoding="utf-8") as file_obj:
         for idx, chapter in enumerate(chapters, start=1):
-            print(f"[{idx}] 下载 {chapter.title} -> {chapter.url}")
+            logger(f"[{idx}] 下载 {chapter.title} -> {chapter.url}")
             try:
                 chapter_html = fetch_html(chapter.url)
             except URLError as exc:
-                print(f"[警告] 章节下载失败，已跳过: {exc}")
+                logger(f"[警告] 章节下载失败，已跳过: {exc}")
                 continue
             title = extract_title(chapter_html)
             content = extract_content(chapter_html)
             if not content:
                 content = "[警告] 未能提取正文。"
 
-            f.write(f"{title}\n")
-            f.write("=" * len(title) + "\n\n")
-            f.write(content)
-            f.write("\n\n\n")
+            file_obj.write(f"{title}\n")
+            file_obj.write("=" * len(title) + "\n\n")
+            file_obj.write(content)
+            file_obj.write("\n\n\n")
             count += 1
             time.sleep(delay)
 
-    print(f"完成：共写入 {count} 章 -> {output_file}")
+    logger(f"完成：共写入 {count} 章 -> {output_file}")
+    return count
+
+
+def run_download(
+    index_url: str,
+    output_file: Path,
+    start: int,
+    end: int,
+    delay: float,
+    logger: Callable[[str], None] = print,
+) -> int:
+    logger(f"读取目录页: {index_url}")
+    try:
+        index_html = fetch_html(index_url)
+    except URLError as exc:
+        logger(f"目录页请求失败: {exc}")
+        return 1
+
+    chapters = discover_chapters(index_url, index_html)
+    if not chapters:
+        logger("未发现章节链接，请检查目录页结构或链接是否可访问。")
+        return 1
+
+    safe_start = max(start, 1)
+    safe_end = end if end > 0 else len(chapters)
+    selected = chapters[safe_start - 1 : safe_end]
+
+    if not selected:
+        logger("筛选后没有章节，请检查起始章节/结束章节。")
+        return 1
+
+    logger(f"发现 {len(chapters)} 章，准备下载 {len(selected)} 章。")
+    save_novel(selected, output_file, delay=max(delay, 0), logger=logger)
+    return 0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="下载 alicesw 小说并导出成 txt")
-    parser.add_argument("index_url", help="小说目录页链接，例如 https://www.alicesw.tw/novel/19861.html")
+    parser.add_argument("index_url", nargs="?", help="小说目录页链接，例如 https://www.alicesw.tw/novel/19861.html")
     parser.add_argument("-o", "--output", default="novel.txt", help="输出 txt 文件路径")
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")
     parser.add_argument("--end", type=int, default=0, help="结束章节（0 表示到最后）")
+    parser.add_argument("--gui", action="store_true", help="启动图形界面")
     return parser.parse_args()
+
+
+def launch_gui() -> int:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+        from tkinter.scrolledtext import ScrolledText
+    except Exception as exc:
+        print(f"GUI 启动失败：{exc}")
+        return 1
+
+    try:
+        root = tk.Tk()
+    except Exception as exc:
+        print(f"GUI 启动失败：{exc}")
+        return 1
+
+    root.title("AliceSW 小说下载器")
+    root.geometry("760x560")
+
+    frame = tk.Frame(root, padx=12, pady=12)
+    frame.pack(fill="both", expand=True)
+
+    tk.Label(frame, text="目录链接").grid(row=0, column=0, sticky="w")
+    url_var = tk.StringVar(value="https://www.alicesw.tw/novel/19861.html")
+    tk.Entry(frame, textvariable=url_var, width=72).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
+
+    tk.Label(frame, text="输出文件").grid(row=1, column=0, sticky="w")
+    output_var = tk.StringVar(value=str(Path.cwd() / "novel.txt"))
+    tk.Entry(frame, textvariable=output_var, width=58).grid(row=1, column=1, columnspan=2, sticky="we", pady=4)
+
+    def choose_output() -> None:
+        path = filedialog.asksaveasfilename(
+            title="选择输出 TXT 文件",
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            output_var.set(path)
+
+    tk.Button(frame, text="浏览", command=choose_output, width=10).grid(row=1, column=3, padx=6)
+
+    tk.Label(frame, text="起始章节").grid(row=2, column=0, sticky="w")
+    start_var = tk.StringVar(value="1")
+    tk.Entry(frame, textvariable=start_var, width=10).grid(row=2, column=1, sticky="w", pady=4)
+
+    tk.Label(frame, text="结束章节(0=最后)").grid(row=2, column=2, sticky="e")
+    end_var = tk.StringVar(value="0")
+    tk.Entry(frame, textvariable=end_var, width=10).grid(row=2, column=3, sticky="w", pady=4)
+
+    tk.Label(frame, text="章节间隔秒").grid(row=3, column=0, sticky="w")
+    delay_var = tk.StringVar(value="0.2")
+    tk.Entry(frame, textvariable=delay_var, width=10).grid(row=3, column=1, sticky="w", pady=4)
+
+    log_box = ScrolledText(frame, height=22)
+    log_box.grid(row=4, column=0, columnspan=4, sticky="nsew", pady=(10, 6))
+    frame.rowconfigure(4, weight=1)
+    frame.columnconfigure(1, weight=1)
+
+    downloading = {"active": False}
+
+    def log(msg: str) -> None:
+        def _append() -> None:
+            log_box.insert("end", msg + "\n")
+            log_box.see("end")
+
+        root.after(0, _append)
+
+    def start_download() -> None:
+        if downloading["active"]:
+            messagebox.showinfo("提示", "下载正在进行中，请稍候。")
+            return
+
+        url = url_var.get().strip()
+        output_path = output_var.get().strip()
+        if not url or not output_path:
+            messagebox.showerror("参数错误", "请填写目录链接与输出文件路径。")
+            return
+
+        try:
+            start = int(start_var.get().strip())
+            end = int(end_var.get().strip())
+            delay = float(delay_var.get().strip())
+        except ValueError:
+            messagebox.showerror("参数错误", "起始/结束章节必须是整数，间隔必须是数字。")
+            return
+
+        downloading["active"] = True
+        log_box.delete("1.0", "end")
+        log("开始下载...")
+
+        def worker() -> None:
+            code = run_download(url, Path(output_path), start, end, delay, logger=log)
+
+            def done() -> None:
+                downloading["active"] = False
+                if code == 0:
+                    messagebox.showinfo("完成", "下载完成。")
+                else:
+                    messagebox.showerror("失败", "下载失败，请检查日志。")
+
+            root.after(0, done)
+
+        Thread(target=worker, daemon=True).start()
+
+    tk.Button(frame, text="开始下载", command=start_download, width=16).grid(row=5, column=0, sticky="w", pady=4)
+    tk.Button(frame, text="退出", command=root.destroy, width=12).grid(row=5, column=3, sticky="e", pady=4)
+
+    root.mainloop()
+    return 0
 
 
 def main() -> int:
     args = parse_args()
-    print(f"读取目录页: {args.index_url}")
-    try:
-        index_html = fetch_html(args.index_url)
-    except URLError as exc:
-        print(f"目录页请求失败: {exc}")
-        return 1
-    chapters = discover_chapters(args.index_url, index_html)
-
-    if not chapters:
-        print("未发现章节链接，请检查目录页结构或链接是否可访问。")
-        return 1
-
-    start = max(args.start, 1)
-    end = args.end if args.end > 0 else len(chapters)
-    selected = chapters[start - 1 : end]
-
-    if not selected:
-        print("筛选后没有章节，请检查 --start/--end 参数。")
-        return 1
-
-    print(f"发现 {len(chapters)} 章，准备下载 {len(selected)} 章。")
-    save_novel(selected, Path(args.output), delay=max(args.delay, 0))
-    return 0
+    if args.gui or not args.index_url:
+        return launch_gui()
+    return run_download(args.index_url, Path(args.output), args.start, args.end, args.delay)
 
 
 if __name__ == "__main__":
