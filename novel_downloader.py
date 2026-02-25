@@ -13,6 +13,7 @@ from pathlib import Path
 from downloader import DownloadPayload, download_novel_payload, normalize_chapter_title, run_download, save_payload_to_epub
 from downloader.models import ChapterContent, NovelMeta
 from downloader.text import safe_filename
+from downloader.sites import detect_source
 
 
 def parse_args() -> argparse.Namespace:
@@ -146,6 +147,27 @@ def save_site_configs(configs: dict) -> None:
     _ensure_output_dirs()
     SITE_CONFIG_FILE.write_text(json.dumps(configs, ensure_ascii=False, indent=2), encoding="utf-8")
 
+
+
+def resolve_site_auth_for_url(input_url: str, site_configs: dict) -> dict | None:
+    source = detect_source(input_url)
+    source_to_name = {
+        "alicesw": "AliceSW",
+        "silvernoelle": "SilverNoelle",
+        "esj": "ESJZone",
+    }
+    site_name = source_to_name.get(source)
+    if not site_name:
+        return None
+    cfg = site_configs.get(site_name, {})
+    if not isinstance(cfg, dict):
+        return None
+    return {
+        "use_login": bool(cfg.get("use_login", False)),
+        "username": str(cfg.get("username", "")),
+        "password": str(cfg.get("password", "")),
+    }
+
 def launch_gui() -> int:
     try:
         import PyQt5
@@ -234,13 +256,14 @@ def launch_gui() -> int:
         failed = pyqtSignal(str)
         progress = pyqtSignal(int, int)
 
-        def __init__(self, url: str, start: int, end: int, delay: float, to_simplified: bool) -> None:
+        def __init__(self, url: str, start: int, end: int, delay: float, to_simplified: bool, site_auth: dict | None = None) -> None:
             super().__init__()
             self.url = url
             self.start_idx = start
             self.end_idx = end
             self.delay = delay
             self.to_simplified = to_simplified
+            self.site_auth = site_auth
 
         def run(self) -> None:
             try:
@@ -252,6 +275,7 @@ def launch_gui() -> int:
                     logger=lambda m: self.log.emit(m),
                     to_simplified=self.to_simplified,
                     progress_callback=lambda cur, total: self.progress.emit(cur, total),
+                    site_auth=self.site_auth,
                 )
                 self.done.emit(payload)
             except Exception as exc:
@@ -951,7 +975,8 @@ def launch_gui() -> int:
             self.append_log("✨ 开始下载 EPUB 数据...（完成后自动打开编辑器）")
             self.set_running(True)
 
-            self.worker = DownloadWorker(input_url, start, end, delay, self.simplified.isChecked())
+            site_auth = resolve_site_auth_for_url(input_url, self.site_configs)
+            self.worker = DownloadWorker(input_url, start, end, delay, self.simplified.isChecked(), site_auth=site_auth)
             self.worker.log.connect(self.append_log)
             self.worker.failed.connect(self.on_failed)
             self.worker.progress.connect(self.update_progress)
@@ -1022,7 +1047,8 @@ def main() -> int:
     args = parse_args()
     if args.gui or not args.index_url:
         return launch_gui()
-    return run_download(args.index_url, Path(args.output), args.start, args.end, args.delay, to_simplified=not args.no_simplified)
+    site_auth = resolve_site_auth_for_url(args.index_url, load_site_configs())
+    return run_download(args.index_url, Path(args.output), args.start, args.end, args.delay, to_simplified=not args.no_simplified, site_auth=site_auth)
 
 
 if __name__ == "__main__":

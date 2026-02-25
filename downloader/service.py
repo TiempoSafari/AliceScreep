@@ -7,9 +7,9 @@ from urllib.error import URLError
 
 from .conversion import OPENCC, maybe_convert_to_simplified
 from .epub import build_epub
-from .http import fetch_html_with_retry
+from .http import HttpClient, fetch_html_with_retry, login_esjzone
 from .models import Chapter, ChapterContent, DownloadPayload
-from .sites import extract_cover_url, fetch_cover_bytes, get_site_adapter
+from .sites import detect_source, extract_cover_url, fetch_cover_bytes, get_site_adapter
 from .text import extract_title, normalize_chapter_title, safe_filename, sanitize_url
 
 
@@ -20,6 +20,7 @@ def _download_chapters(
     logger: Callable[[str], None] = print,
     to_simplified: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
+    http_client: HttpClient | None = None,
 ) -> list[ChapterContent]:
     chapter_list = list(chapters)
     total = len(chapter_list)
@@ -33,7 +34,7 @@ def _download_chapters(
             continue
         logger(f"[{idx}] 下载中: {chapter.title} -> {chapter_url}")
         try:
-            chapter_html = fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0)
+            chapter_html = (http_client.fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0))
         except (URLError, ValueError, OSError) as exc:
             logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
             if progress_callback:
@@ -69,9 +70,24 @@ def download_novel_payload(
     logger: Callable[[str], None] = print,
     to_simplified: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
+    site_auth: dict | None = None,
 ) -> DownloadPayload | None:
     logger(f"输入链接: {input_url}")
     adapter = get_site_adapter(input_url)
+
+    http_client: HttpClient | None = None
+    auth = site_auth or {}
+    source = detect_source(input_url)
+    if source == "esj" and auth.get("use_login"):
+        username = str(auth.get("username", "")).strip()
+        password = str(auth.get("password", ""))
+        if username and password:
+            try:
+                http_client = login_esjzone(username, password, logger=logger)
+            except Exception as exc:
+                logger(f"❌ [警告] ESJ 登录失败，将以未登录状态继续: {exc}")
+        else:
+            logger("❌ [警告] ESJ 已启用登录，但用户名或密码为空，将以未登录状态继续。")
 
     chapter_index_url = adapter.build_chapter_index_url(input_url)
     if chapter_index_url:
@@ -81,7 +97,7 @@ def download_novel_payload(
         chapter_index_url = input_url
 
     try:
-        index_html = fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0)
+        index_html = (http_client.fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0))
     except URLError as exc:
         logger(f"❌ 目录页请求失败: {exc}")
         return None
@@ -115,6 +131,7 @@ def download_novel_payload(
         logger=logger,
         to_simplified=to_simplified,
         progress_callback=progress_callback,
+        http_client=http_client,
     )
     if not downloaded:
         logger("❌ 没有成功下载任何章节，未生成 EPUB。")
@@ -124,7 +141,7 @@ def download_novel_payload(
     novel_url = adapter.build_novel_url(input_url)
     if novel_url:
         try:
-            novel_html = fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0)
+            novel_html = (http_client.fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0) if http_client else fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0))
             cover_url = extract_cover_url(novel_html, base_url=novel_url)
             if cover_url:
                 cover_bytes, cover_type, cover_name = fetch_cover_bytes(cover_url)
@@ -163,8 +180,9 @@ def run_download(
     delay: float,
     logger: Callable[[str], None] = print,
     to_simplified: bool = True,
+    site_auth: dict | None = None,
 ) -> int:
-    payload = download_novel_payload(input_url, start, end, delay, logger=logger, to_simplified=to_simplified)
+    payload = download_novel_payload(input_url, start, end, delay, logger=logger, to_simplified=to_simplified, site_auth=site_auth)
     if payload is None:
         return 1
     return save_payload_to_epub(payload, output_file, logger=logger)
