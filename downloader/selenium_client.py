@@ -77,33 +77,45 @@ class SeleniumClient:
         login_url = "https://www.esjzone.cc/my/login"
         self.driver.get(login_url)
 
-        wait = WebDriverWait(self.driver, 20)
-        email = wait.until(EC.presence_of_element_located((By.NAME, "email")))
-        pwd = wait.until(EC.presence_of_element_located((By.NAME, "password")))
+        wait = WebDriverWait(self.driver, 25)
+        if logger:
+            logger("⏳ ESJ: 等待登录表单加载...")
+
+        # ESJ 登录区与注册区都含 email 字段，优先锁定 login-box 表单
+        email = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "form.login-box input[name='email']")))
+        pwd = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "form.login-box input[name='pwd']")))
 
         email.clear()
         email.send_keys(username)
         pwd.clear()
         pwd.send_keys(password)
 
-        buttons = self.driver.find_elements(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
-        if not buttons:
-            raise RuntimeError("未找到 ESJ 登录提交按钮")
-        buttons[0].click()
+        if logger:
+            logger("⏳ ESJ: 已填入账号密码，正在提交登录...")
 
-        # 等待登录完成（URL变化或页面出现登出关键词）
-        WebDriverWait(self.driver, 20).until(
+        # 该站点登录按钮是 a.btn-send[data-send='mem_login']，并非 submit
+        login_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "form.login-box .btn-send[data-send='mem_login']")))
+        try:
+            login_btn.click()
+        except Exception:
+            # 某些情况下被广告层遮挡，用 JS 兜底点击
+            self.driver.execute_script("arguments[0].click();", login_btn)
+
+        # 等待登录完成：登录入口消失 / 出现登出标记 / 跳转
+        WebDriverWait(self.driver, 25).until(
             lambda d: (
                 d.current_url != login_url
+                or "/my/login" not in d.current_url
                 or "logout" in d.page_source.lower()
                 or "登出" in d.page_source
                 or "我的书架" in d.page_source
+                or ("登入 / 註冊" not in d.page_source and "/my/login" not in d.page_source)
             )
         )
 
+        page = self.driver.page_source
         if logger:
-            page = self.driver.page_source
-            if "logout" in page.lower() or "登出" in page or "我的书架" in page:
+            if "logout" in page.lower() or "登出" in page or "我的书架" in page or "登入 / 註冊" not in page:
                 logger("✅ ESJ Selenium 登录成功，已应用浏览器会话。")
             else:
                 logger("❌ [警告] ESJ Selenium 登录后未检测到明显登录态标记，后续抓取可能失败。")
