@@ -19,18 +19,25 @@ def _download_chapters(
     delay: float = 0.2,
     logger: Callable[[str], None] = print,
     to_simplified: bool = True,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[ChapterContent]:
+    chapter_list = list(chapters)
+    total = len(chapter_list)
     results: list[ChapterContent] = []
-    for idx, chapter in enumerate(chapters, start=1):
+    for idx, chapter in enumerate(chapter_list, start=1):
         chapter_url = sanitize_url(chapter.url)
         if not chapter_url:
             logger(f"❌ [警告] 跳过非法章节链接: {chapter.url}")
+            if progress_callback:
+                progress_callback(idx, total)
             continue
         logger(f"[{idx}] 下载中: {chapter.title} -> {chapter_url}")
         try:
             chapter_html = fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0)
         except (URLError, ValueError, OSError) as exc:
             logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
+            if progress_callback:
+                progress_callback(idx, total)
             continue
 
         page_title = extract_title(chapter_html)
@@ -40,6 +47,8 @@ def _download_chapters(
         content = adapter.extract_content(chapter_html)
         if not content:
             logger(f"❌ [警告] 正文提取失败，已跳过: {chapter_url}")
+            if progress_callback:
+                progress_callback(idx, total)
             continue
 
         title = maybe_convert_to_simplified(title, to_simplified)
@@ -47,6 +56,8 @@ def _download_chapters(
         results.append(ChapterContent(title=title, content=content, source_url=chapter_url))
         logger(f"✅ 下载成功: {title}")
         time.sleep(delay)
+        if progress_callback:
+            progress_callback(idx, total)
     return results
 
 
@@ -57,6 +68,7 @@ def download_novel_payload(
     delay: float,
     logger: Callable[[str], None] = print,
     to_simplified: bool = True,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> DownloadPayload | None:
     logger(f"输入链接: {input_url}")
     adapter = get_site_adapter(input_url)
@@ -96,7 +108,14 @@ def download_novel_payload(
         return None
 
     logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
-    downloaded = _download_chapters(selected, adapter, delay=max(delay, 0), logger=logger, to_simplified=to_simplified)
+    downloaded = _download_chapters(
+        selected,
+        adapter,
+        delay=max(delay, 0),
+        logger=logger,
+        to_simplified=to_simplified,
+        progress_callback=progress_callback,
+    )
     if not downloaded:
         logger("❌ 没有成功下载任何章节，未生成 EPUB。")
         return None

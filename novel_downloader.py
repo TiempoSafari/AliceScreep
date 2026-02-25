@@ -28,7 +28,7 @@ def launch_gui() -> int:
     try:
         import PyQt5
         from PyQt5.QtCore import QLibraryInfo, Qt, QThread, pyqtSignal
-        from PyQt5.QtGui import QColor, QFont
+        from PyQt5.QtGui import QColor, QFont, QPixmap
         from PyQt5.QtWidgets import (
             QAbstractItemView,
             QApplication,
@@ -106,6 +106,7 @@ def launch_gui() -> int:
         log = pyqtSignal(str)
         done = pyqtSignal(object)
         failed = pyqtSignal(str)
+        progress = pyqtSignal(int, int)
 
         def __init__(self, url: str, start: int, end: int, delay: float, to_simplified: bool) -> None:
             super().__init__()
@@ -124,6 +125,7 @@ def launch_gui() -> int:
                     self.delay,
                     logger=lambda m: self.log.emit(m),
                     to_simplified=self.to_simplified,
+                    progress_callback=lambda cur, total: self.progress.emit(cur, total),
                 )
                 self.done.emit(payload)
             except Exception as exc:
@@ -159,6 +161,10 @@ def launch_gui() -> int:
             self.title_edit = QLineEdit(payload.meta.title)
             self.author_edit = QLineEdit(payload.meta.author)
             self.cover_label = QLabel(payload.cover_name or "(当前无封面)")
+            self.cover_preview = QLabel()
+            self.cover_preview.setFixedSize(120, 160)
+            self.cover_preview.setAlignment(Qt.AlignCenter)
+            self.cover_preview.setStyleSheet("background:#f3f6fb; border:1px solid #d5dfef; border-radius:8px;")
             cover_btn = QPushButton("更换封面")
             cover_btn.clicked.connect(self.replace_cover)
 
@@ -169,9 +175,11 @@ def launch_gui() -> int:
             info_l.addWidget(QLabel("封面"), 1, 2)
             info_l.addWidget(self.cover_label, 1, 3)
             info_l.addWidget(cover_btn, 1, 4)
+            info_l.addWidget(self.cover_preview, 0, 5, 2, 1)
             info_l.setColumnStretch(1, 1)
             info_l.setColumnStretch(3, 1)
             root.addWidget(info_card)
+            self._update_cover_preview()
 
             body = QHBoxLayout()
             body.setSpacing(10)
@@ -240,6 +248,24 @@ def launch_gui() -> int:
             root.addLayout(actions)
 
             self.refresh_chapter_list()
+
+
+        def _update_cover_preview(self) -> None:
+            if not self.payload.cover_bytes:
+                self.cover_preview.setText("无封面")
+                self.cover_preview.setPixmap(QPixmap())
+                return
+            pix = QPixmap()
+            if not pix.loadFromData(self.payload.cover_bytes):
+                self.cover_preview.setText("封面加载失败")
+                return
+            shown = pix.scaled(
+                self.cover_preview.width() - 8,
+                self.cover_preview.height() - 8,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            self.cover_preview.setPixmap(shown)
 
         def refresh_chapter_list(self, select: int = 0) -> None:
             self.chapter_list.clear()
@@ -318,6 +344,7 @@ def launch_gui() -> int:
                 self.payload.cover_name = "cover.jpg"
             self.payload.cover_bytes = raw
             self.cover_label.setText(Path(path).name)
+            self._update_cover_preview()
 
         def save_and_accept(self) -> None:
             self._sync_order_from_list()
@@ -540,7 +567,9 @@ def launch_gui() -> int:
             mid.addWidget(tip_card)
 
             self.progress = QProgressBar()
-            self.progress.setRange(0, 0)
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress.setFormat("0%")
             self.progress.hide()
             outer.addWidget(self.progress)
 
@@ -571,7 +600,18 @@ def launch_gui() -> int:
         def set_running(self, running: bool) -> None:
             self.start_btn.setDisabled(running)
             self.progress.setVisible(running)
+            if running:
+                self.progress.setValue(0)
+                self.progress.setFormat("0%")
             self.status.setText("下载中..." if running else "就绪")
+
+        def update_progress(self, current: int, total: int) -> None:
+            if total <= 0:
+                return
+            percent = int(current * 100 / total)
+            self.progress.setValue(percent)
+            self.progress.setFormat(f"{percent}% ({current}/{total})")
+            self.status.setText(f"下载中... {current}/{total}")
 
         def start_download(self) -> None:
             input_url = self.url_edit.text().strip()
@@ -594,6 +634,7 @@ def launch_gui() -> int:
             self.worker = DownloadWorker(input_url, start, end, delay, self.simplified.isChecked())
             self.worker.log.connect(self.append_log)
             self.worker.failed.connect(self.on_failed)
+            self.worker.progress.connect(self.update_progress)
             self.worker.done.connect(lambda payload: self.on_done(payload, output_path))
             self.worker.start()
 
