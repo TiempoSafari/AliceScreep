@@ -1,6 +1,6 @@
 # AliceScreep
 
-用于下载 `https://www.alicesw.tw/` 小说并导出为 **EPUB**，支持图形界面（GUI），并提供更现代的 Windows 风格界面。
+用于下载 `https://www.alicesw.tw/` 与 `https://silvernoelle.com/` 的小说目录并导出为 **EPUB**，支持图形界面（GUI），并提供更现代的 Windows 风格界面。
 
 ## 图形界面（推荐）
 
@@ -16,14 +16,17 @@ python novel_downloader.py --gui
 python novel_downloader.py
 ```
 
-你可以输入以下两种链接（都支持）：
+你可以输入以下链接（都支持）：
 
-- 小说页：`https://www.alicesw.tw/novel/2735.html`
-- 章节目录页：`https://www.alicesw.tw/other/chapters/id/2735.html`
+- AliceSW 小说页：`https://www.alicesw.tw/novel/2735.html`
+- AliceSW 章节目录页：`https://www.alicesw.tw/other/chapters/id/2735.html`
+- SilverNoelle 分类目录页：`https://silvernoelle.com/category/.../`
 
-程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面。
+对 AliceSW，程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面；对 SilverNoelle，会自动跟随“较旧文章 / Older Posts”分页抓取完整章节列表，并按发布时间从旧到新下载。
 
 默认流程为：**下载数据 → 打开编辑界面 → 修改章节名/封面 → 再保存 EPUB**。
+
+当输出路径使用默认值 `novel.epub` 时，程序会自动改用“小说标题.epub”保存，避免重复手动改文件名。
 
 默认会在保存前执行“繁体转简体”（章节内容、章节名、书名、作者）。
 
@@ -42,6 +45,8 @@ python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_273
 - 每章独立标题和正文
 - 作品元数据（标题、作者、语言、时间）
 - 自动尝试抓取封面图（抓取失败时会生成无封面 EPUB）
+
+- SilverNoelle 章节下载会自动去除文末“共享此文章 / 分享到 X、Facebook、Telegram”等站点分享信息。
 
 ## 日志说明
 
@@ -100,3 +105,18 @@ pip install opencc-python-reimplemented
 ```
 
 若未安装 OpenCC，程序会给出日志警告并保持原文。
+
+
+## 项目结构（便于扩展多站点）
+
+- `novel_downloader.py`：CLI/GUI 入口。
+- `downloader/service.py`：下载主流程编排（统一逻辑）。
+- `downloader/sites.py`：站点适配器（网站差异化逻辑），后续新增网站主要在此扩展。
+- `downloader/epub.py`：EPUB 生成（公共逻辑）。
+- `downloader/http.py` / `downloader/text.py` / `downloader/conversion.py`：网络、文本、繁转简等通用能力。
+
+### 新增网站建议
+
+1. 在 `downloader/sites.py` 新建一个 `SiteAdapter` 子类，实现 `build_chapter_index_url / discover_chapters / extract_meta / extract_content`。
+2. 在 `get_site_adapter` 中按域名返回新适配器。
+3. 其它流程（下载调度、章节过滤、EPUB 生成、GUI 编辑）无需重复实现。
