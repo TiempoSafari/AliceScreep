@@ -125,3 +125,17 @@ pip install opencc-python-reimplemented
 1. 在 `downloader/sites.py` 新建一个 `SiteAdapter` 子类，实现 `build_chapter_index_url / discover_chapters / extract_meta / extract_content`。
 2. 在 `get_site_adapter` 中按域名返回新适配器。
 3. 其它流程（下载调度、章节过滤、EPUB 生成、GUI 编辑）无需重复实现。
+
+
+### 若出现 `no qt platform plugin could be initialized`
+
+这是 Qt 平台插件（如 `qwindows.dll`）路径或依赖 DLL 未被正确加载导致。
+
+当前版本已在程序启动时自动尝试修复：
+- 自动设置 `QT_QPA_PLATFORM_PLUGIN_PATH` 到 PyQt5 的 `platforms` 目录。
+- 在 Windows 下自动补充 Qt `bin` 目录到 `PATH`，并默认 `QT_QPA_PLATFORM=windows`。
+
+若仍失败，请检查：
+- Python 与 PyQt5 位数是否一致（建议都为 x64）
+- 重新安装 `PyQt5`：`pip install -U --force-reinstall PyQt5`
+- 安装/修复 **Microsoft Visual C++ Redistributable 2015-2022 (x64)**

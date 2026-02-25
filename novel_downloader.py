@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -25,7 +26,8 @@ def parse_args() -> argparse.Namespace:
 
 def launch_gui() -> int:
     try:
-        from PyQt5.QtCore import Qt, QThread, pyqtSignal
+        import PyQt5
+        from PyQt5.QtCore import QLibraryInfo, Qt, QThread, pyqtSignal
         from PyQt5.QtGui import QFont
         from PyQt5.QtWidgets import (
             QAbstractItemView,
@@ -53,6 +55,41 @@ def launch_gui() -> int:
         print(f"GUI 启动失败：{exc}")
         print("请安装 PyQt5：pip install PyQt5")
         return 1
+
+
+    def _configure_qt_runtime() -> None:
+        """尽量自动修复 Qt platform plugin 初始化失败问题。"""
+        plugin_candidates: list[Path] = []
+        try:
+            qt_plugins = Path(QLibraryInfo.location(QLibraryInfo.PluginsPath))
+            plugin_candidates.append(qt_plugins / "platforms")
+        except Exception:
+            pass
+
+        pyqt_root = Path(PyQt5.__file__).resolve().parent
+        plugin_candidates.extend(
+            [
+                pyqt_root / "Qt5" / "plugins" / "platforms",
+                pyqt_root / "Qt" / "plugins" / "platforms",
+                pyqt_root / "plugins" / "platforms",
+            ]
+        )
+
+        for candidate in plugin_candidates:
+            if candidate.exists():
+                os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(candidate))
+                break
+
+        # Windows 常见问题：找不到 Qt 依赖 DLL，给 PATH 补充几个候选目录
+        if os.name == "nt":
+            dll_dirs: list[Path] = []
+            for parent in [pyqt_root / "Qt5", pyqt_root / "Qt", pyqt_root]:
+                dll_dirs.extend([parent / "bin", parent])
+            old_path = os.environ.get("PATH", "")
+            prefix = os.pathsep.join(str(d) for d in dll_dirs if d.exists())
+            if prefix:
+                os.environ["PATH"] = prefix + (os.pathsep + old_path if old_path else "")
+            os.environ.setdefault("QT_QPA_PLATFORM", "windows")
 
     class S:
         BG = "#edf2f8"
@@ -460,6 +497,8 @@ def launch_gui() -> int:
                 QMessageBox.information(self, "完成", "下载完成，已编辑并生成 EPUB。")
             else:
                 self.append_log("❌ 已取消保存")
+
+    _configure_qt_runtime()
 
     app = QApplication([])
     app.setFont(QFont("Microsoft YaHei", 10))
