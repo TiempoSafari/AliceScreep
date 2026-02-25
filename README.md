@@ -84,6 +84,7 @@ python novel_downloader.py "https://www.alicesw.tw/novel/2735.html" -o novel_273
 
 - 使用 `ttk` 主题组件，优先启用 `vista/xpnative`（可用时），更接近 Windows 新风格。
 - 增加顶部标题区、卡片式参数区、进度条和深色日志面板。
+- 进一步优化细节：圆角卡片阴影、输入框焦点态、按钮 hover/pressed 动效、精细化滚动条样式。
 - 日志颜色：成功绿色，失败/警告红色。
 
 

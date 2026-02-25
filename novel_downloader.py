@@ -28,7 +28,7 @@ def launch_gui() -> int:
     try:
         import PyQt5
         from PyQt5.QtCore import QLibraryInfo, Qt, QThread, pyqtSignal
-        from PyQt5.QtGui import QFont
+        from PyQt5.QtGui import QColor, QFont
         from PyQt5.QtWidgets import (
             QAbstractItemView,
             QApplication,
@@ -36,6 +36,7 @@ def launch_gui() -> int:
             QDialog,
             QFileDialog,
             QFrame,
+            QGraphicsDropShadowEffect,
             QGridLayout,
             QHBoxLayout,
             QLabel,
@@ -132,6 +133,11 @@ def launch_gui() -> int:
         def __init__(self) -> None:
             super().__init__()
             self.setObjectName("card")
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(28)
+            shadow.setOffset(0, 8)
+            shadow.setColor(QColor(19, 33, 68, 28))
+            self.setGraphicsEffect(shadow)
 
     class ChapterEditor(QDialog):
         def __init__(self, payload: DownloadPayload, output_path: str, output_edit: QLineEdit, parent: QWidget | None = None) -> None:
@@ -176,6 +182,7 @@ def launch_gui() -> int:
             ll.setContentsMargins(12, 12, 12, 12)
             ll.addWidget(QLabel("章节列表（可拖拽排序）"))
             self.chapter_list = QListWidget()
+            self.chapter_list.setAlternatingRowColors(False)
             self.chapter_list.setDragDropMode(QAbstractItemView.InternalMove)
             self.chapter_list.setDefaultDropAction(Qt.MoveAction)
             self.chapter_list.currentRowChanged.connect(self.on_select)
@@ -332,14 +339,127 @@ def launch_gui() -> int:
             self.setMinimumSize(980, 760)
             self.setStyleSheet(
                 f"""
-                QMainWindow, QWidget {{ background:{S.BG}; color:{S.TEXT}; font-family:'Microsoft YaHei'; font-size:10pt; }}
-                QFrame#card {{ background:{S.CARD}; border:1px solid #dde4ef; border-radius:14px; }}
-                QLineEdit {{ background:white; border:1px solid #d9e1ec; border-radius:8px; padding:8px; }}
-                QPushButton {{ background:#f8fafc; border:1px solid #d9e1ec; border-radius:8px; padding:8px 12px; }}
-                QPushButton:hover {{ background:#eef3fb; }}
-                QPushButton#primary {{ background:{S.PRIMARY}; color:white; border:none; font-weight:600; }}
-                QPushButton#primary:hover {{ background:{S.PRIMARY_H}; }}
-                QTextEdit#log {{ background:{S.LOG_BG}; color:{S.LOG_TXT}; border:none; border-radius:10px; padding:12px; font-family:Consolas; }}
+                QMainWindow, QWidget {{
+                    background:{S.BG};
+                    color:{S.TEXT};
+                    font-family:'Segoe UI','Microsoft YaHei','PingFang SC';
+                    font-size:10pt;
+                }}
+                QLabel {{
+                    background: transparent;
+                    color:{S.TEXT};
+                }}
+                QFrame#card {{
+                    background:{S.CARD};
+                    border:1px solid #d8e2f0;
+                    border-radius:16px;
+                }}
+                QLineEdit {{
+                    background:#ffffff;
+                    border:1px solid #d7e0ee;
+                    border-radius:10px;
+                    padding:9px 10px;
+                    selection-background-color:#cfe1ff;
+                }}
+                QLineEdit:focus {{
+                    border:1px solid #76a2ff;
+                    background:#fdfefe;
+                }}
+                QPushButton {{
+                    background:#f8fafc;
+                    border:1px solid #d9e1ec;
+                    border-radius:10px;
+                    padding:8px 12px;
+                    font-weight:500;
+                }}
+                QPushButton:hover {{
+                    background:#eef3fb;
+                    border-color:#c4d6f4;
+                }}
+                QPushButton:pressed {{
+                    background:#e2ebfa;
+                }}
+                QPushButton#primary {{
+                    background:{S.PRIMARY};
+                    color:white;
+                    border:none;
+                    font-weight:600;
+                    padding:9px 14px;
+                }}
+                QPushButton#primary:hover {{
+                    background:{S.PRIMARY_H};
+                }}
+                QPushButton#primary:pressed {{
+                    background:#275ed0;
+                }}
+                QTextEdit#log, QListWidget {{
+                    border:1px solid #1f2d49;
+                    border-radius:10px;
+                }}
+                QTextEdit#log {{
+                    background:{S.LOG_BG};
+                    color:{S.LOG_TXT};
+                    padding:12px;
+                    font-family:'Cascadia Code','Consolas';
+                }}
+                QListWidget {{
+                    background:#f8fbff;
+                    border:1px solid #d9e3f3;
+                    color:{S.TEXT};
+                    padding:6px;
+                }}
+                QListWidget::item {{
+                    border-radius:8px;
+                    padding:7px 8px;
+                    margin:2px 0;
+                }}
+                QListWidget::item:selected {{
+                    background:#dce9ff;
+                    color:#0e2244;
+                }}
+                QScrollBar:vertical {{
+                    background:transparent;
+                    width:10px;
+                    margin:4px 0 4px 0;
+                }}
+                QScrollBar::handle:vertical {{
+                    background:#b4c4df;
+                    min-height:24px;
+                    border-radius:5px;
+                }}
+                QScrollBar::handle:vertical:hover {{
+                    background:#98add0;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height:0;
+                }}
+                QScrollBar:horizontal {{
+                    background:transparent;
+                    height:10px;
+                    margin:0 4px 0 4px;
+                }}
+                QScrollBar::handle:horizontal {{
+                    background:#b4c4df;
+                    min-width:24px;
+                    border-radius:5px;
+                }}
+                QScrollBar::handle:horizontal:hover {{
+                    background:#98add0;
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                    width:0;
+                }}
+                QProgressBar {{
+                    border:1px solid #d9e2f1;
+                    border-radius:7px;
+                    background:#ecf1f8;
+                    text-align:center;
+                    height:14px;
+                }}
+                QProgressBar::chunk {{
+                    border-radius:6px;
+                    background:{S.PRIMARY};
+                }}
                 """
             )
 
@@ -500,8 +620,10 @@ def launch_gui() -> int:
 
     _configure_qt_runtime()
 
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication([])
-    app.setFont(QFont("Microsoft YaHei", 10))
+    app.setFont(QFont("Segoe UI", 10))
     w = MainWindow()
     w.show()
     return app.exec_()
