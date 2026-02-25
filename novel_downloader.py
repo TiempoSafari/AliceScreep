@@ -35,27 +35,36 @@ def launch_gui() -> int:
 
     root = tk.Tk()
     root.title("AliceScreep 小说下载器")
-    root.geometry("980x760")
-    root.configure(bg="#eef2f8")
+    root.geometry("1080x820")
+    root.minsize(980, 760)
+    root.configure(bg="#e9eef6")
 
     style = ttk.Style(root)
     if "clam" in style.theme_names():
         style.theme_use("clam")
-    style.configure("Card.TFrame", background="#ffffff", relief="flat")
-    style.configure("Card.TLabelframe", background="#ffffff", borderwidth=1, relief="solid")
-    style.configure("Card.TLabelframe.Label", background="#ffffff", foreground="#1f2a44", font=("Segoe UI", 11, "bold"))
-    style.configure("Title.TLabel", background="#eef2f8", foreground="#1a2b49", font=("Segoe UI", 17, "bold"))
-    style.configure("Hint.TLabel", background="#eef2f8", foreground="#667085", font=("Segoe UI", 9))
-    style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
 
-    container = ttk.Frame(root, padding=18, style="Card.TFrame")
-    container.pack(fill="both", expand=True, padx=14, pady=14)
+    style.configure("App.TFrame", background="#e9eef6")
+    style.configure("Surface.TFrame", background="#ffffff")
+    style.configure("Card.TLabelframe", background="#ffffff", relief="solid", borderwidth=1)
+    style.configure("Card.TLabelframe.Label", background="#ffffff", foreground="#1b2940", font=("Segoe UI", 10, "bold"))
+    style.configure("Head.TLabel", background="#e9eef6", foreground="#0f1b2d", font=("Segoe UI", 21, "bold"))
+    style.configure("SubHead.TLabel", background="#e9eef6", foreground="#667085", font=("Segoe UI", 10))
+    style.configure("TLabel", font=("Segoe UI", 10))
+    style.configure("TEntry", padding=7)
+    style.configure("TButton", padding=(12, 8), font=("Segoe UI", 10))
+    style.configure("Primary.TButton", padding=(14, 9), font=("Segoe UI", 10, "bold"), background="#2f6fed", foreground="#ffffff")
+    style.map("Primary.TButton", background=[("active", "#3e7cff")])
 
-    ttk.Label(container, text="小说下载与编辑", style="Title.TLabel").pack(anchor="w")
-    ttk.Label(container, text="支持 AliceSW / SilverNoelle，下载后可编辑章节、封面和顺序", style="Hint.TLabel").pack(anchor="w", pady=(2, 10))
+    app = ttk.Frame(root, style="App.TFrame", padding=18)
+    app.pack(fill="both", expand=True)
 
-    card = ttk.LabelFrame(container, text="下载参数", padding=14, style="Card.TLabelframe")
-    card.pack(fill="x")
+    header = ttk.Frame(app, style="App.TFrame")
+    header.pack(fill="x", pady=(0, 10))
+    ttk.Label(header, text="小说下载与编辑工作台", style="Head.TLabel").pack(anchor="w")
+    ttk.Label(header, text="扁平化卡片布局 · 支持下载、编辑封面、拖拽排序、正则批量改名", style="SubHead.TLabel").pack(anchor="w", pady=(3, 0))
+
+    config_card = ttk.LabelFrame(app, text="下载参数", style="Card.TLabelframe", padding=14)
+    config_card.pack(fill="x")
 
     url_var = tk.StringVar()
     output_var = tk.StringVar(value=str(Path.cwd() / "novel.epub"))
@@ -63,40 +72,59 @@ def launch_gui() -> int:
     end_var = tk.StringVar(value="0")
     delay_var = tk.StringVar(value="0.2")
     simplified_var = tk.IntVar(value=1)
+    status_var = tk.StringVar(value="就绪")
 
-    ttk.Label(card, text="小说链接").grid(row=0, column=0, sticky="w")
-    ttk.Entry(card, textvariable=url_var, width=78).grid(row=0, column=1, columnspan=3, sticky="we", pady=5)
+    ttk.Label(config_card, text="小说链接").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+    ttk.Entry(config_card, textvariable=url_var).grid(row=0, column=1, columnspan=5, sticky="we", pady=4)
 
-    ttk.Label(card, text="输出文件").grid(row=1, column=0, sticky="w")
-    ttk.Entry(card, textvariable=output_var, width=74).grid(row=1, column=1, columnspan=2, sticky="we", pady=5)
+    ttk.Label(config_card, text="输出文件").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+    ttk.Entry(config_card, textvariable=output_var).grid(row=1, column=1, columnspan=4, sticky="we", pady=4)
 
     def browse_output() -> None:
         path = filedialog.asksaveasfilename(title="保存 EPUB", defaultextension=".epub", filetypes=[("EPUB", "*.epub")])
         if path:
             output_var.set(path)
 
-    ttk.Button(card, text="浏览", command=browse_output).grid(row=1, column=3, padx=(8, 0))
+    ttk.Button(config_card, text="浏览", command=browse_output).grid(row=1, column=5, padx=(8, 0), sticky="we")
 
-    ttk.Label(card, text="起始章节").grid(row=2, column=0, sticky="w")
-    ttk.Entry(card, textvariable=start_var, width=10).grid(row=2, column=1, sticky="w", pady=5)
-    ttk.Label(card, text="结束章节").grid(row=2, column=2, sticky="e")
-    ttk.Entry(card, textvariable=end_var, width=10).grid(row=2, column=3, sticky="w", pady=5)
+    ttk.Label(config_card, text="起始章节").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
+    ttk.Entry(config_card, textvariable=start_var, width=8).grid(row=2, column=1, sticky="w", pady=(4, 0))
+    ttk.Label(config_card, text="结束章节").grid(row=2, column=2, sticky="e", padx=(14, 8), pady=(4, 0))
+    ttk.Entry(config_card, textvariable=end_var, width=8).grid(row=2, column=3, sticky="w", pady=(4, 0))
+    ttk.Label(config_card, text="下载间隔(秒)").grid(row=2, column=4, sticky="e", padx=(14, 8), pady=(4, 0))
+    ttk.Entry(config_card, textvariable=delay_var, width=8).grid(row=2, column=5, sticky="w", pady=(4, 0))
 
-    ttk.Label(card, text="下载间隔(秒)").grid(row=3, column=0, sticky="w")
-    ttk.Entry(card, textvariable=delay_var, width=10).grid(row=3, column=1, sticky="w", pady=5)
-    ttk.Checkbutton(card, text="保存前繁体转简体", variable=simplified_var).grid(row=3, column=2, columnspan=2, sticky="w")
+    ttk.Checkbutton(config_card, text="保存前繁体转简体", variable=simplified_var).grid(row=3, column=1, columnspan=3, sticky="w", pady=(8, 0))
 
-    log_card = ttk.LabelFrame(container, text="下载日志", padding=10, style="Card.TLabelframe")
-    log_card.pack(fill="both", expand=True, pady=(12, 8))
+    for col, weight in enumerate((0, 4, 0, 0, 0, 0)):
+        config_card.columnconfigure(col, weight=weight)
 
-    log_box = ScrolledText(log_card, height=22, bg="#0f1728", fg="#d8f8d8", insertbackground="#ffffff", relief="flat")
+    center = ttk.Frame(app, style="App.TFrame")
+    center.pack(fill="both", expand=True, pady=(10, 8))
+
+    log_card = ttk.LabelFrame(center, text="下载日志", style="Card.TLabelframe", padding=10)
+    log_card.pack(side="left", fill="both", expand=True, padx=(0, 8))
+    log_box = ScrolledText(log_card, height=24, bg="#0b1220", fg="#cfe7ff", insertbackground="#ffffff", relief="flat", padx=12, pady=12, font=("Consolas", 10))
     log_box.pack(fill="both", expand=True)
 
-    progress = ttk.Progressbar(container, mode="indeterminate")
-    progress.pack(fill="x", pady=(0, 8))
+    tips_card = ttk.LabelFrame(center, text="操作提示", style="Card.TLabelframe", padding=10)
+    tips_card.pack(side="left", fill="y")
+    tips = [
+        "1) 填写链接后点击开始下载",
+        "2) 下载完成会自动弹出编辑器",
+        "3) 可拖拽章节调整顺序",
+        "4) 可用正则批量改章节名",
+        "5) 支持替换封面并导出 EPUB",
+    ]
+    for item in tips:
+        ttk.Label(tips_card, text=f"• {item}", wraplength=240, justify="left").pack(anchor="w", pady=2)
 
-    footer = ttk.Frame(container, style="Card.TFrame")
-    footer.pack(fill="x")
+    progress = ttk.Progressbar(app, mode="indeterminate")
+    progress.pack(fill="x")
+
+    bottom = ttk.Frame(app, style="App.TFrame")
+    bottom.pack(fill="x", pady=(8, 0))
+    ttk.Label(bottom, textvariable=status_var, style="SubHead.TLabel").pack(side="left")
 
     downloading = {"active": False}
 
@@ -108,17 +136,21 @@ def launch_gui() -> int:
 
     def set_running(active: bool) -> None:
         downloading["active"] = active
-        progress.start(10) if active else progress.stop()
+        status_var.set("下载中..." if active else "就绪")
+        if active:
+            progress.start(9)
+        else:
+            progress.stop()
 
     def open_editor(payload: DownloadPayload, output_path: str) -> bool:
         editor = tk.Toplevel(root)
         editor.title("编辑章节与封面")
-        editor.geometry("980x740")
+        editor.geometry("1060x760")
         editor.transient(root)
         editor.grab_set()
-        editor.configure(bg="#edf3ff")
+        editor.configure(bg="#e9eef6")
 
-        ef = ttk.Frame(editor, padding=14, style="Card.TFrame")
+        ef = ttk.Frame(editor, style="App.TFrame", padding=14)
         ef.pack(fill="both", expand=True)
 
         top = ttk.LabelFrame(ef, text="书籍信息", padding=10, style="Card.TLabelframe")
@@ -126,7 +158,7 @@ def launch_gui() -> int:
 
         ttk.Label(top, text="书名").grid(row=0, column=0, sticky="w")
         title_var = tk.StringVar(value=payload.meta.title)
-        ttk.Entry(top, textvariable=title_var, width=70).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
+        ttk.Entry(top, textvariable=title_var).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
 
         ttk.Label(top, text="作者").grid(row=1, column=0, sticky="w")
         author_var = tk.StringVar(value=payload.meta.author)
@@ -160,7 +192,7 @@ def launch_gui() -> int:
 
         ttk.Button(top, text="更换封面", command=replace_cover).grid(row=1, column=4, padx=(10, 0))
 
-        body = ttk.Frame(ef, style="Card.TFrame")
+        body = ttk.Frame(ef, style="App.TFrame")
         body.pack(fill="both", expand=True)
 
         left = ttk.LabelFrame(body, text="章节列表（拖拽排序）", padding=10, style="Card.TLabelframe")
@@ -213,7 +245,7 @@ def launch_gui() -> int:
         repl_var = tk.StringVar()
         ttk.Entry(right, textvariable=regex_var, width=34).pack(fill="x", pady=(2, 4))
         ttk.Entry(right, textvariable=repl_var, width=34).pack(fill="x", pady=(0, 6))
-        ttk.Label(right, text="上框: 正则；下框: 替换文本（支持\\1）", style="Hint.TLabel").pack(anchor="w")
+        ttk.Label(right, text="上框: 正则；下框: 替换文本（支持\1）", style="SubHead.TLabel").pack(anchor="w")
 
         scope_var = tk.StringVar(value="all")
         ttk.Radiobutton(right, text="作用于全部章节", value="all", variable=scope_var).pack(anchor="w")
@@ -231,7 +263,6 @@ def launch_gui() -> int:
                 messagebox.showerror("正则错误", str(exc), parent=editor)
                 return
 
-            targets: list[int]
             if scope_var.get() == "selected":
                 sel = chapter_list.curselection()
                 if not sel:
@@ -280,9 +311,9 @@ def launch_gui() -> int:
             saved["ok"] = True
             editor.destroy()
 
-        actions = ttk.Frame(ef, style="Card.TFrame")
+        actions = ttk.Frame(ef, style="App.TFrame")
         actions.pack(fill="x", pady=(8, 0))
-        ttk.Button(actions, text="保存修改并导出", style="Accent.TButton", command=save_and_close).pack(side="right")
+        ttk.Button(actions, text="保存修改并导出", style="Primary.TButton", command=save_and_close).pack(side="right")
         ttk.Button(actions, text="取消", command=editor.destroy).pack(side="right", padx=(0, 8))
 
         top.columnconfigure(1, weight=1)
@@ -326,14 +357,15 @@ def launch_gui() -> int:
                     log("❌ 已取消保存")
                     return
                 save_payload_to_epub(payload, Path(output_var.get().strip()), logger=log)
+                status_var.set("导出完成")
                 messagebox.showinfo("完成", "下载完成，已编辑并生成 EPUB。")
 
             root.after(0, done)
 
         Thread(target=worker, daemon=True).start()
 
-    ttk.Button(footer, text="开始下载并编辑", command=start_download).pack(side="left")
-    ttk.Button(footer, text="退出", command=root.destroy).pack(side="right")
+    ttk.Button(bottom, text="开始下载并编辑", style="Primary.TButton", command=start_download).pack(side="right")
+    ttk.Button(bottom, text="退出", command=root.destroy).pack(side="right", padx=(0, 8))
 
     root.mainloop()
     return 0
