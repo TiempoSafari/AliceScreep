@@ -22,7 +22,7 @@ class SeleniumClient:
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1400,1000")
+        options.add_argument("--window-size=1920,1200")
         options.add_argument("--lang=zh-CN")
 
         if logger:
@@ -124,10 +124,10 @@ class SeleniumClient:
 
 def create_selenium_client_with_timeout(
     logger: Callable[[str], None] | None = None,
-    timeout_seconds: float = 20.0,
+    timeout_seconds: float = 180.0,
     headless: bool = True,
 ) -> SeleniumClient | None:
-    """在超时时间内创建 SeleniumClient，避免 driver 初始化长时间卡住主流程。"""
+    """在超时时间内创建 SeleniumClient，避免 driver 初始化长时间卡住主流程。默认超时时间较长以适配慢速环境。"""
     import threading
 
     holder: dict[str, SeleniumClient | Exception] = {}

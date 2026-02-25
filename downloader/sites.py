@@ -273,6 +273,12 @@ class ESJZoneSiteAdapter(GenericSiteAdapter):
             return None
         return input_url
 
+    def build_novel_url(self, input_url: str) -> str | None:
+        parsed = urlparse(input_url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return input_url
+
     def discover_chapters(self, index_url: str, html_text: str, logger: Callable[[str], None]) -> list[Chapter]:
         parser = AnchorParser()
         parser.feed(html_text)

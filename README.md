@@ -31,11 +31,13 @@ GUI 右侧“操作提示”卡片中会显示“支持网站”列表，方便�
 
 主界面左侧为“网站配置”卡片边栏（支持滚动）：每个站点显示为独立卡片，点击后弹出配置窗口，可编辑入口链接、是否登录、用户名和密码。
 
-ESJZone 若遇到“未发现章节”通常是未登录状态导致，请在 ESJZone 配置中开启登录并填写账号密码（登录页：`https://www.esjzone.cc/my/login`）。当前 ESJ 仅使用 Selenium 抓取，并默认以可见浏览器模式启动；若 Selenium 不可用，会直接中止并提示错误。日志中会显示“导入 selenium / 配置参数 / 启动 ChromeDriver / 登录”各阶段，便于定位卡住步骤。
+ESJZone 若遇到“未发现章节”通常是未登录状态导致，请在 ESJZone 配置中开启登录并填写账号密码（登录页：`https://www.esjzone.cc/my/login`）。当前 ESJ 仅使用 Selenium 抓取，并默认以无界面（headless）模式启动；若 Selenium 不可用，会直接中止并提示错误。日志中会显示“导入 selenium / 配置参数 / 启动 ChromeDriver / 登录”各阶段，便于定位卡住步骤。
 
 对 AliceSW，程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面；对 SilverNoelle，会自动跟随“较旧文章 / Older Posts”分页抓取完整章节列表，并按发布时间从旧到新下载，同时保留 `<ruby><rt>` 注音显示；对 ESJZone，会从详情页提取论坛章节链接并下载。
 
 默认流程为：**下载数据 → 打开编辑界面 → 修改章节名/封面 → 再保存 EPUB**。
+
+目前所有站点均采用串行下载章节，以保证稳定性与站点兼容性。
 
 默认输出到项目内的 `output/` 目录（默认文件名为 `output/novel.epub`）。
 

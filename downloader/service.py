@@ -37,8 +37,10 @@ def _download_chapters(
 ) -> list[ChapterContent]:
     chapter_list = list(chapters)
     total = len(chapter_list)
-    results: list[ChapterContent] = []
+    if total == 0:
+        return []
 
+    downloaded: list[ChapterContent] = []
     for idx, chapter in enumerate(chapter_list, start=1):
         chapter_url = sanitize_url(chapter.url)
         if not chapter_url:
@@ -76,14 +78,15 @@ def _download_chapters(
 
         title = maybe_convert_to_simplified(title, to_simplified)
         content = maybe_convert_to_simplified(content, to_simplified)
-        results.append(ChapterContent(title=title, content=content, source_url=chapter_url))
+        downloaded.append(ChapterContent(title=title, content=content, source_url=chapter_url))
         logger(f"✅ 下载成功: {title}")
 
-        time.sleep(delay)
+        if delay > 0:
+            time.sleep(delay)
         if progress_callback:
             progress_callback(idx, total)
 
-    return results
+    return downloaded
 
 
 def download_novel_payload(
@@ -104,11 +107,11 @@ def download_novel_payload(
     source = detect_source(input_url)
 
     if source == "esj":
-        logger("⏳ ESJ: 正在初始化 Selenium（可见浏览器模式，最多等待 45 秒）...")
+        logger("⏳ ESJ: 正在初始化 Selenium（无界面模式，最多等待 180 秒）...")
         selenium_client = create_selenium_client_with_timeout(
             logger=logger,
-            timeout_seconds=45.0,
-            headless=False,
+            timeout_seconds=180.0,
+            headless=True,
         )
         if selenium_client is None:
             logger("❌ ESJ Selenium 初始化失败或超时，已中止。")
