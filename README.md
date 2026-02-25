@@ -26,6 +26,8 @@ python novel_downloader.py
 
 默认流程为：**下载数据 → 打开编辑界面 → 修改章节名/封面 → 再保存 EPUB**。
 
+当输出路径使用默认值 `novel.epub` 时，程序会自动改用“小说标题.epub”保存，避免重复手动改文件名。
+
 默认会在保存前执行“繁体转简体”（章节内容、章节名、书名、作者）。
 
 ## 命令行模式（可选）
@@ -103,3 +105,18 @@ pip install opencc-python-reimplemented
 ```
 
 若未安装 OpenCC，程序会给出日志警告并保持原文。
+
+
+## 项目结构（便于扩展多站点）
+
+- `novel_downloader.py`：CLI/GUI 入口。
+- `downloader/service.py`：下载主流程编排（统一逻辑）。
+- `downloader/sites.py`：站点适配器（网站差异化逻辑），后续新增网站主要在此扩展。
+- `downloader/epub.py`：EPUB 生成（公共逻辑）。
+- `downloader/http.py` / `downloader/text.py` / `downloader/conversion.py`：网络、文本、繁转简等通用能力。
+
+### 新增网站建议
+
+1. 在 `downloader/sites.py` 新建一个 `SiteAdapter` 子类，实现 `build_chapter_index_url / discover_chapters / extract_meta / extract_content`。
+2. 在 `get_site_adapter` 中按域名返回新适配器。
+3. 其它流程（下载调度、章节过滤、EPUB 生成、GUI 编辑）无需重复实现。
