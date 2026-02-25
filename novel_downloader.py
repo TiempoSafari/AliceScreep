@@ -108,10 +108,7 @@ def launch_gui() -> int:
 
     def set_running(active: bool) -> None:
         downloading["active"] = active
-        if active:
-            progress.start(10)
-        else:
-            progress.stop()
+        progress.start(10) if active else progress.stop()
 
     def open_editor(payload: DownloadPayload, output_path: str) -> bool:
         editor = tk.Toplevel(root)
@@ -335,7 +332,7 @@ def launch_gui() -> int:
 
         Thread(target=worker, daemon=True).start()
 
-    ttk.Button(footer, text="开始下载并编辑", style="Accent.TButton", command=start_download).pack(side="left")
+    ttk.Button(footer, text="开始下载并编辑", command=start_download).pack(side="left")
     ttk.Button(footer, text="退出", command=root.destroy).pack(side="right")
 
     root.mainloop()
