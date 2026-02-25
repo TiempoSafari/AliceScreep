@@ -5,13 +5,17 @@ from typing import Callable
 
 
 class SeleniumClient:
-    def __init__(self, headless: bool = True) -> None:
+    def __init__(self, headless: bool = True, logger: Callable[[str], None] | None = None) -> None:
+        if logger:
+            logger("⏳ Selenium: 正在导入 selenium 模块...")
         try:
             from selenium import webdriver
             from selenium.webdriver.chrome.options import Options
         except Exception as exc:  # pragma: no cover
             raise RuntimeError("未安装 selenium，请先执行: pip install selenium") from exc
 
+        if logger:
+            logger("⏳ Selenium: 正在配置浏览器启动参数...")
         options = Options()
         if headless:
             options.add_argument("--headless=new")
@@ -21,12 +25,16 @@ class SeleniumClient:
         options.add_argument("--window-size=1400,1000")
         options.add_argument("--lang=zh-CN")
 
+        if logger:
+            logger("⏳ Selenium: 正在启动 ChromeDriver（首次可能下载驱动，耗时较长）...")
         try:
             self.driver = webdriver.Chrome(options=options)
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(
                 "Selenium ChromeDriver 启动失败，请安装 Chrome/Chromium 与兼容的 chromedriver（或确保 Selenium Manager 可用）"
             ) from exc
+        if logger:
+            logger("✅ Selenium: ChromeDriver 启动成功。")
 
     def close(self) -> None:
         try:
@@ -114,7 +122,7 @@ def create_selenium_client_with_timeout(
 
     def _worker() -> None:
         try:
-            holder["client"] = SeleniumClient(headless=headless)
+            holder["client"] = SeleniumClient(headless=headless, logger=logger)
         except Exception as exc:
             holder["error"] = exc
 
@@ -124,12 +132,12 @@ def create_selenium_client_with_timeout(
 
     if th.is_alive():
         if logger:
-            logger(f"❌ [警告] Selenium 启动超时（>{timeout_seconds:.0f}s），将回退 HTTP 抓取。")
+            logger(f"❌ [警告] Selenium 启动超时（>{timeout_seconds:.0f}s）。可能卡在驱动下载/浏览器启动阶段。")
         return None
 
     if "error" in holder:
         if logger:
-            logger(f"❌ [警告] Selenium 启动失败，将回退 HTTP 抓取: {holder['error']}")
+            logger(f"❌ [警告] Selenium 启动失败: {holder['error']}")
         return None
 
     return holder.get("client")  # type: ignore[return-value]

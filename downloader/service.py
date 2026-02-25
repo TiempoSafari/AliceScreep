@@ -9,7 +9,7 @@ from .conversion import OPENCC, maybe_convert_to_simplified
 from .epub import build_epub
 from .http import fetch_html_with_retry
 from .models import Chapter, ChapterContent, DownloadPayload
-from .selenium_client import SeleniumClient
+from .selenium_client import SeleniumClient, create_selenium_client_with_timeout
 from .sites import detect_source, extract_cover_url, fetch_cover_bytes, get_site_adapter
 from .text import extract_title, normalize_chapter_title, safe_filename, sanitize_url
 
@@ -104,11 +104,15 @@ def download_novel_payload(
     source = detect_source(input_url)
 
     if source == "esj":
-        logger("⏳ ESJ: 正在初始化 Selenium（可见浏览器模式）...")
-        try:
-            selenium_client = SeleniumClient(headless=False)
-        except Exception as exc:
-            logger(f"❌ ESJ Selenium 启动失败，已中止: {exc}")
+        logger("⏳ ESJ: 正在初始化 Selenium（可见浏览器模式，最多等待 45 秒）...")
+        selenium_client = create_selenium_client_with_timeout(
+            logger=logger,
+            timeout_seconds=45.0,
+            headless=False,
+        )
+        if selenium_client is None:
+            logger("❌ ESJ Selenium 初始化失败或超时，已中止。")
+            logger("💡 建议检查：1) Chrome 是否已安装 2) 是否可访问 Google 驱动下载源 3) 杀毒软件是否拦截 chromedriver")
             return None
 
         if auth.get("use_login"):
@@ -121,6 +125,7 @@ def download_novel_payload(
             try:
                 logger("⏳ ESJ: 正在使用 Selenium 登录...")
                 selenium_client.login_esjzone(username, password, logger=logger)
+                logger("✅ ESJ: Selenium 登录流程结束，开始抓取目录页...")
             except Exception as exc:
                 logger(f"❌ ESJ Selenium 登录失败，已中止: {exc}")
                 selenium_client.close()
