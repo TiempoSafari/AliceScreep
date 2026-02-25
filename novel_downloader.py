@@ -226,7 +226,15 @@ def extract_content(page_html: str, source: str = SOURCE_GENERIC) -> str:
             flags=re.IGNORECASE | re.DOTALL,
         )
         if match:
-            text = strip_tags(match.group(1))
+            entry_html = match.group(1)
+            entry_html = re.sub(
+                r'<div[^>]+class=["\'][^"\']*(?:sharedaddy|sd-sharing|shared-post|jp-sharing-input-touch)[^"\']*["\'][^>]*>.*?</div>',
+                '',
+                entry_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            text = strip_tags(entry_html)
+            text = re.sub(r'共享此文章：[\s\S]*$', '', text).strip()
             if len(text) > 60:
                 return text
 
@@ -246,8 +254,6 @@ def extract_content(page_html: str, source: str = SOURCE_GENERIC) -> str:
     if not body:
         return ""
     return strip_tags(body.group(1))
-
-
 def extract_chapter_order(title: str, url: str) -> int:
     title_match = re.search(r"第\s*(\d+)\s*章", title)
     if title_match:
@@ -310,36 +316,82 @@ def pick_chapter_list_html(page_html: str) -> str:
     return page_html
 
 
-def discover_silvernoelle_chapters(index_url: str, html_text: str) -> list[Chapter]:
-    """解析 silvernoelle 的分类目录页（WordPress）。"""
-    articles = re.findall(r"<article\b[^>]*>(.*?)</article>", html_text, flags=re.IGNORECASE | re.DOTALL)
+def find_silvernoelle_older_posts_url(page_html: str, base_url: str) -> str | None:
+    patterns = (
+        r'<a[^>]+class=["\'][^"\']*(?:nav-previous|nextpostslink|older-posts)[^"\']*["\'][^>]+href=["\']([^"\']+)["\']',
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(?:\s*较旧文章\s*|\s*Older Posts\s*)</a>',
+        r'<a[^>]+rel=["\']next["\'][^>]+href=["\']([^"\']+)["\']',
+    )
+    for pattern in patterns:
+        m = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
+        if not m:
+            continue
+        normalized = sanitize_url(m.group(1), base_url=base_url)
+        if normalized:
+            return normalized
+    return None
+
+
+def collect_silvernoelle_category_pages(
+    index_url: str,
+    first_html: str,
+    logger: Callable[[str], None],
+    max_pages: int = 80,
+) -> list[tuple[str, str]]:
+    pages: list[tuple[str, str]] = [(index_url, first_html)]
+    visited: set[str] = {index_url}
+    next_url = find_silvernoelle_older_posts_url(first_html, base_url=index_url)
+
+    while next_url and len(pages) < max_pages:
+        if next_url in visited:
+            break
+        visited.add(next_url)
+        try:
+            html_text = fetch_html_with_retry(next_url, logger=logger, retries=2, wait_seconds=1.0)
+        except Exception as exc:
+            logger(f"❌ [警告] 拉取分页失败，后续页面将跳过: {next_url} | 错误: {exc}")
+            break
+        pages.append((next_url, html_text))
+        logger(f"✅ 已拉取 SilverNoelle 目录分页: {len(pages)} -> {next_url}")
+        next_url = find_silvernoelle_older_posts_url(html_text, base_url=next_url)
+
+    if len(pages) >= max_pages and next_url:
+        logger(f"❌ [警告] 目录分页达到上限 {max_pages} 页，可能仍有章节未抓取。")
+    return pages
+
+
+def discover_silvernoelle_chapters(index_url: str, html_text: str, logger: Callable[[str], None]) -> list[Chapter]:
+    """解析 silvernoelle 的分类目录页（WordPress，支持“较旧文章”分页）。"""
+    pages = collect_silvernoelle_category_pages(index_url, html_text, logger=logger)
     chapters: list[Chapter] = []
     seen: set[str] = set()
 
-    for article_html in articles:
-        m = re.search(
-            r'<h[1-4][^>]+class=["\'][^"\']*entry-title[^"\']*["\'][^>]*>\s*<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
-            article_html,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if not m:
+    for page_url, page_html in pages:
+        articles = re.findall(r"<article\b[^>]*>(.*?)</article>", page_html, flags=re.IGNORECASE | re.DOTALL)
+        for article_html in articles:
             m = re.search(
-                r'<a[^>]+href=["\']([^"\']+)["\'][^>]*(?:rel=["\'][^"\']*bookmark[^"\']*["\'])?[^>]*>(.*?)</a>',
+                r'<h[1-4][^>]+class=["\'][^"\']*entry-title[^"\']*["\'][^>]*>\s*<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
                 article_html,
                 flags=re.IGNORECASE | re.DOTALL,
             )
-        if not m:
-            continue
-        chapter_url = sanitize_url(m.group(1), base_url=index_url)
-        if not chapter_url or chapter_url in seen:
-            continue
+            if not m:
+                m = re.search(
+                    r'<a[^>]+href=["\']([^"\']+)["\'][^>]*(?:rel=["\'][^"\']*bookmark[^"\']*["\'])?[^>]*>(.*?)</a>',
+                    article_html,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+            if not m:
+                continue
+            chapter_url = sanitize_url(m.group(1), base_url=page_url)
+            if not chapter_url or chapter_url in seen:
+                continue
 
-        title = strip_tags(m.group(2))
-        if not title:
-            continue
+            title = strip_tags(m.group(2))
+            if not title:
+                continue
 
-        seen.add(chapter_url)
-        chapters.append(Chapter(title=title, url=chapter_url))
+            seen.add(chapter_url)
+            chapters.append(Chapter(title=title, url=chapter_url))
 
     chapters.reverse()
     return chapters
@@ -352,7 +404,7 @@ def discover_chapters(
     logger: Callable[[str], None] = print,
 ) -> List[Chapter]:
     if source == SOURCE_SILVERNOELLE:
-        chapters = discover_silvernoelle_chapters(index_url, html_text)
+        chapters = discover_silvernoelle_chapters(index_url, html_text, logger=logger)
         logger(f"章节解析完成：候选文章 {len(chapters)}，有效章节 {len(chapters)}")
         return chapters
 
