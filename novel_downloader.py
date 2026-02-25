@@ -116,13 +116,21 @@ def load_site_configs() -> dict:
 
     merged = json.loads(json.dumps(DEFAULT_SITE_CONFIGS))
     for name, cfg in loaded.items():
-        if name in merged and isinstance(cfg, dict):
-            merged[name].update({
-                "base_url": str(cfg.get("base_url", merged[name]["base_url"])),
-                "username": str(cfg.get("username", "")),
-                "password": str(cfg.get("password", "")),
-                "use_login": bool(cfg.get("use_login", False)),
-            })
+        if not isinstance(cfg, dict):
+            continue
+        if name not in merged:
+            merged[name] = {
+                "base_url": "",
+                "username": "",
+                "password": "",
+                "use_login": False,
+            }
+        merged[name].update({
+            "base_url": str(cfg.get("base_url", merged[name].get("base_url", ""))),
+            "username": str(cfg.get("username", "")),
+            "password": str(cfg.get("password", "")),
+            "use_login": bool(cfg.get("use_login", False)),
+        })
     return merged
 
 
@@ -141,7 +149,9 @@ def launch_gui() -> int:
             QButtonGroup,
             QCheckBox,
             QDialog,
+            QDialogButtonBox,
             QFileDialog,
+            QFormLayout,
             QFrame,
             QGraphicsDropShadowEffect,
             QGridLayout,
@@ -155,8 +165,8 @@ def launch_gui() -> int:
             QPushButton,
             QProgressBar,
             QRadioButton,
+            QScrollArea,
             QTextEdit,
-            QTabWidget,
             QVBoxLayout,
             QWidget,
         )
@@ -248,6 +258,57 @@ def launch_gui() -> int:
             shadow.setOffset(0, 8)
             shadow.setColor(QColor(19, 33, 68, 28))
             self.setGraphicsEffect(shadow)
+
+
+    class SiteConfigDialog(QDialog):
+        def __init__(self, site_name: str, cfg: dict, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setWindowTitle(f"{site_name} 站点配置")
+            self.resize(460, 280)
+
+            root = QVBoxLayout(self)
+            root.setContentsMargins(14, 14, 14, 14)
+            root.setSpacing(10)
+
+            hint = QLabel("可配置入口链接与登录凭证，便于网站地址变化或需要登录后再抓取。")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"color:{S.SUB};")
+            root.addWidget(hint)
+
+            form = QFormLayout()
+            form.setSpacing(8)
+            self.base_url_edit = QLineEdit(str(cfg.get("base_url", "")))
+            self.use_login_chk = QCheckBox("该站点需要登录")
+            self.use_login_chk.setChecked(bool(cfg.get("use_login", False)))
+            self.username_edit = QLineEdit(str(cfg.get("username", "")))
+            self.password_edit = QLineEdit(str(cfg.get("password", "")))
+            self.password_edit.setEchoMode(QLineEdit.Password)
+
+            form.addRow("入口链接", self.base_url_edit)
+            form.addRow("登录选项", self.use_login_chk)
+            form.addRow("用户名", self.username_edit)
+            form.addRow("密码", self.password_edit)
+            root.addLayout(form)
+
+            self.use_login_chk.toggled.connect(self._toggle_login_fields)
+            self._toggle_login_fields(self.use_login_chk.isChecked())
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+            buttons.rejected.connect(self.reject)
+            buttons.accepted.connect(self.accept)
+            root.addWidget(buttons)
+
+        def _toggle_login_fields(self, enabled: bool) -> None:
+            self.username_edit.setEnabled(enabled)
+            self.password_edit.setEnabled(enabled)
+
+        def get_config(self) -> dict:
+            return {
+                "base_url": self.base_url_edit.text().strip(),
+                "use_login": self.use_login_chk.isChecked(),
+                "username": self.username_edit.text().strip(),
+                "password": self.password_edit.text(),
+            }
 
     class ChapterEditor(QDialog):
         def __init__(self, payload: DownloadPayload, output_path: str, output_edit: QLineEdit, parent: QWidget | None = None) -> None:
@@ -491,7 +552,8 @@ def launch_gui() -> int:
             super().__init__()
             self.worker: DownloadWorker | None = None
             self.site_configs = load_site_configs()
-            self.site_config_widgets: dict[str, dict[str, object]] = {}
+            self.selected_site_name = next(iter(self.site_configs.keys()), "")
+            self.site_card_buttons: dict[str, QPushButton] = {}
             self._build_ui()
 
         def _build_ui(self) -> None:
@@ -540,6 +602,13 @@ def launch_gui() -> int:
                 }}
                 QPushButton:pressed {{
                     background:#e2ebfa;
+                }}
+                QPushButton#siteCard:hover {{
+                    background:#edf4ff;
+                    border-color:#b6caee;
+                }}
+                QPushButton#siteCard:pressed {{
+                    background:#e4edfc;
                 }}
                 QPushButton#primary {{
                     background:{S.PRIMARY};
@@ -632,55 +701,46 @@ def launch_gui() -> int:
             shell.setSpacing(10)
 
             sidebar = Card()
-            sidebar.setFixedWidth(320)
+            sidebar.setFixedWidth(340)
             side_l = QVBoxLayout(sidebar)
             side_l.setContentsMargins(12, 12, 12, 12)
+            side_l.setSpacing(8)
             side_l.addWidget(QLabel("网站配置"))
-            side_hint = QLabel("可配置站点入口与登录账号，便于网站地址变更或未来登录抓取。")
+            side_hint = QLabel("每个网站使用独立配置卡片。点击卡片可弹窗编辑入口链接与登录信息。")
             side_hint.setWordWrap(True)
             side_hint.setStyleSheet(f"color:{S.SUB};")
             side_l.addWidget(side_hint)
 
-            self.site_tabs = QTabWidget()
-            side_l.addWidget(self.site_tabs, 1)
+            side_scroll = QScrollArea()
+            side_scroll.setWidgetResizable(True)
+            side_scroll.setFrameShape(QFrame.NoFrame)
+            side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-            for site_name, cfg in self.site_configs.items():
-                tab = QWidget()
-                tl = QVBoxLayout(tab)
-                tl.setContentsMargins(6, 6, 6, 6)
-                tl.setSpacing(8)
+            side_wrap = QWidget()
+            self.site_cards_layout = QVBoxLayout(side_wrap)
+            self.site_cards_layout.setContentsMargins(0, 4, 0, 4)
+            self.site_cards_layout.setSpacing(8)
 
-                tl.addWidget(QLabel("入口链接"))
-                base_edit = QLineEdit(cfg.get("base_url", ""))
-                tl.addWidget(base_edit)
+            for site_name in self.site_configs.keys():
+                btn = QPushButton()
+                btn.setObjectName("siteCard")
+                btn.setCursor(Qt.PointingHandCursor)
+                cfg = self.site_configs.get(site_name, {})
+                base = str(cfg.get("base_url", "")).strip() or "(未设置入口链接)"
+                btn.setText(f"{site_name}\n{base}")
+                btn.setToolTip("点击编辑站点配置")
+                btn.setMinimumHeight(74)
+                btn.setStyleSheet("text-align:left; padding:10px 12px;")
+                btn.clicked.connect(lambda _=False, name=site_name: self.open_site_config_dialog(name))
+                self.site_card_buttons[site_name] = btn
+                self.site_cards_layout.addWidget(btn)
 
-                use_login = QCheckBox("该站点需要登录")
-                use_login.setChecked(bool(cfg.get("use_login", False)))
-                tl.addWidget(use_login)
-
-                tl.addWidget(QLabel("用户名"))
-                user_edit = QLineEdit(cfg.get("username", ""))
-                tl.addWidget(user_edit)
-
-                tl.addWidget(QLabel("密码"))
-                pwd_edit = QLineEdit(cfg.get("password", ""))
-                pwd_edit.setEchoMode(QLineEdit.Password)
-                tl.addWidget(pwd_edit)
-
-                save_btn = QPushButton("保存该站点配置")
-                save_btn.clicked.connect(lambda _=False, name=site_name: self.save_site_config(name))
-                tl.addWidget(save_btn)
-                tl.addStretch(1)
-
-                self.site_config_widgets[site_name] = {
-                    "base_url": base_edit,
-                    "use_login": use_login,
-                    "username": user_edit,
-                    "password": pwd_edit,
-                }
-                self.site_tabs.addTab(tab, site_name)
+            self.site_cards_layout.addStretch(1)
+            side_scroll.setWidget(side_wrap)
+            side_l.addWidget(side_scroll, 1)
 
             shell.addWidget(sidebar)
+            self.refresh_site_card_styles()
 
             content = QWidget()
             shell.addWidget(content, 1)
@@ -800,22 +860,39 @@ def launch_gui() -> int:
             bottom.addWidget(start_btn)
             outer.addLayout(bottom)
 
-        def save_site_config(self, site_name: str) -> None:
-            widgets = self.site_config_widgets.get(site_name)
-            if not widgets:
+        def refresh_site_card_styles(self) -> None:
+            for name, btn in self.site_card_buttons.items():
+                active = name == self.selected_site_name
+                if active:
+                    btn.setStyleSheet(
+                        "text-align:left; padding:10px 12px;"
+                        "background:#dfeaff; border:1px solid #8bb4ff; border-radius:12px;"
+                        "font-weight:600;"
+                    )
+                else:
+                    btn.setStyleSheet(
+                        "text-align:left; padding:10px 12px;"
+                        "background:#f8fbff; border:1px solid #d3def0; border-radius:12px;"
+                    )
+
+        def open_site_config_dialog(self, site_name: str) -> None:
+            self.selected_site_name = site_name
+            self.refresh_site_card_styles()
+            cfg = self.site_configs.get(site_name, {})
+            dialog = SiteConfigDialog(site_name, cfg, self)
+            if dialog.exec_() != QDialog.Accepted:
                 return
-            self.site_configs[site_name] = {
-                "base_url": widgets["base_url"].text().strip(),
-                "use_login": widgets["use_login"].isChecked(),
-                "username": widgets["username"].text().strip(),
-                "password": widgets["password"].text(),
-            }
+
+            self.site_configs[site_name] = dialog.get_config()
             save_site_configs(self.site_configs)
+            updated_base = self.site_configs[site_name].get("base_url", "")
+            self.site_card_buttons[site_name].setText(f"{site_name}\n{updated_base or '(未设置入口链接)'}")
             QMessageBox.information(self, "配置已保存", f"{site_name} 配置已保存。")
 
         def current_site_default_url(self) -> str:
-            site_name = self.site_tabs.tabText(self.site_tabs.currentIndex()) if self.site_tabs.count() else ""
-            cfg = self.site_configs.get(site_name, {})
+            if not self.selected_site_name:
+                return ""
+            cfg = self.site_configs.get(self.selected_site_name, {})
             return str(cfg.get("base_url", "")).strip()
 
         def browse_output(self) -> None:
