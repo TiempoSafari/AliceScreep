@@ -53,6 +53,10 @@ UA = (
     "Chrome/126.0.0.0 Safari/537.36"
 )
 
+SOURCE_ALICESW = "alicesw"
+SOURCE_SILVERNOELLE = "silvernoelle"
+SOURCE_GENERIC = "generic"
+
 
 @dataclass
 class Chapter:
@@ -110,6 +114,15 @@ class AnchorParser(HTMLParser):
             self.links.append((self._href, text))
         self._href = None
         self._text_parts = []
+
+
+def detect_source(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    if "alicesw" in host:
+        return SOURCE_ALICESW
+    if "silvernoelle.com" in host:
+        return SOURCE_SILVERNOELLE
+    return SOURCE_GENERIC
 
 
 def fetch_bytes(url: str, timeout: int = 30) -> bytes:
@@ -205,7 +218,18 @@ def extract_title(page_html: str) -> str:
     return "未知标题"
 
 
-def extract_content(page_html: str) -> str:
+def extract_content(page_html: str, source: str = SOURCE_GENERIC) -> str:
+    if source == SOURCE_SILVERNOELLE:
+        match = re.search(
+            r'<div[^>]+class=["\'][^"\']*entry-content[^"\']*["\'][^>]*>(.*?)</div>',
+            page_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            text = strip_tags(match.group(1))
+            if len(text) > 60:
+                return text
+
     patterns = (
         r'<div[^>]+id=["\']content["\'][^>]*>(.*?)</div>',
         r'<div[^>]+class=["\'][^"\']*content[^"\']*["\'][^>]*>(.*?)</div>',
@@ -245,20 +269,30 @@ def extract_novel_id(url: str) -> str:
     return ""
 
 
-def build_chapter_index_url(input_url: str) -> Optional[str]:
+def build_chapter_index_url(input_url: str, source: str | None = None) -> Optional[str]:
     parsed = urlparse(input_url)
     if not parsed.scheme or not parsed.netloc:
         return None
+
+    source = source or detect_source(input_url)
+    if source != SOURCE_ALICESW:
+        return input_url
+
     novel_id = extract_novel_id(input_url)
     if not novel_id:
         return None
     return f"{parsed.scheme}://{parsed.netloc}/other/chapters/id/{novel_id}.html"
 
 
-def build_novel_url(input_url: str) -> Optional[str]:
+def build_novel_url(input_url: str, source: str | None = None) -> Optional[str]:
     parsed = urlparse(input_url)
     if not parsed.scheme or not parsed.netloc:
         return None
+
+    source = source or detect_source(input_url)
+    if source != SOURCE_ALICESW:
+        return None
+
     novel_id = extract_novel_id(input_url)
     if not novel_id:
         return None
@@ -276,7 +310,52 @@ def pick_chapter_list_html(page_html: str) -> str:
     return page_html
 
 
-def discover_chapters(index_url: str, html_text: str, logger: Callable[[str], None] = print) -> List[Chapter]:
+def discover_silvernoelle_chapters(index_url: str, html_text: str) -> list[Chapter]:
+    """解析 silvernoelle 的分类目录页（WordPress）。"""
+    articles = re.findall(r"<article\b[^>]*>(.*?)</article>", html_text, flags=re.IGNORECASE | re.DOTALL)
+    chapters: list[Chapter] = []
+    seen: set[str] = set()
+
+    for article_html in articles:
+        m = re.search(
+            r'<h[1-4][^>]+class=["\'][^"\']*entry-title[^"\']*["\'][^>]*>\s*<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+            article_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            m = re.search(
+                r'<a[^>]+href=["\']([^"\']+)["\'][^>]*(?:rel=["\'][^"\']*bookmark[^"\']*["\'])?[^>]*>(.*?)</a>',
+                article_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        if not m:
+            continue
+        chapter_url = sanitize_url(m.group(1), base_url=index_url)
+        if not chapter_url or chapter_url in seen:
+            continue
+
+        title = strip_tags(m.group(2))
+        if not title:
+            continue
+
+        seen.add(chapter_url)
+        chapters.append(Chapter(title=title, url=chapter_url))
+
+    chapters.reverse()
+    return chapters
+
+
+def discover_chapters(
+    index_url: str,
+    html_text: str,
+    source: str = SOURCE_GENERIC,
+    logger: Callable[[str], None] = print,
+) -> List[Chapter]:
+    if source == SOURCE_SILVERNOELLE:
+        chapters = discover_silvernoelle_chapters(index_url, html_text)
+        logger(f"章节解析完成：候选文章 {len(chapters)}，有效章节 {len(chapters)}")
+        return chapters
+
     chapter_area = pick_chapter_list_html(html_text)
     parser = AnchorParser()
     parser.feed(chapter_area)
@@ -326,11 +405,17 @@ def discover_chapters(index_url: str, html_text: str, logger: Callable[[str], No
     return chapters
 
 
-def extract_meta(index_html: str, fallback_title: str = "未命名小说") -> NovelMeta:
+def extract_meta(index_html: str, fallback_title: str = "未命名小说", source: str = SOURCE_GENERIC) -> NovelMeta:
+    if source == SOURCE_SILVERNOELLE:
+        title_match = re.search(r'<h1[^>]+class=["\'][^"\']*archive-title[^"\']*["\'][^>]*>(.*?)</h1>', index_html, re.I | re.S)
+        title = strip_tags(title_match.group(1)) if title_match else extract_title(index_html)
+        title = re.sub(r"^分类：", "", title).strip() or fallback_title
+        return NovelMeta(title=title, author="Silvernoelle")
+
     title = fallback_title
     author = "未知作者"
 
-    title_match = re.search(r"<div[^>]+class=[\"']mu_h1[\"'][^>]*>\s*<h1[^>]*>(.*?)</h1>", index_html, re.I | re.S)
+    title_match = re.search(r'<div[^>]+class=["\'][^"\']*mu_h1[^"\']*["\'][^>]*>\s*<h1[^>]*>(.*?)</h1>', index_html, re.I | re.S)
     if title_match:
         title = strip_tags(title_match.group(1))
     else:
@@ -516,6 +601,7 @@ def download_chapters(
     delay: float = 0.2,
     logger: Callable[[str], None] = print,
     to_simplified: bool = True,
+    source: str = SOURCE_GENERIC,
 ) -> list[ChapterContent]:
     results: list[ChapterContent] = []
 
@@ -537,7 +623,7 @@ def download_chapters(
         if title == "未知章节":
             title = normalize_chapter_title(page_title)
 
-        content = extract_content(chapter_html)
+        content = extract_content(chapter_html, source=source)
         if not content:
             logger(f"❌ [警告] 正文提取失败，已跳过: {chapter_url}")
             continue
@@ -561,8 +647,9 @@ def download_novel_payload(
     to_simplified: bool = True,
 ) -> DownloadPayload | None:
     logger(f"输入链接: {input_url}")
+    source = detect_source(input_url)
 
-    chapter_index_url = build_chapter_index_url(input_url)
+    chapter_index_url = build_chapter_index_url(input_url, source=source)
     if chapter_index_url:
         logger(f"使用章节目录页: {chapter_index_url}")
     else:
@@ -575,7 +662,7 @@ def download_novel_payload(
         logger(f"❌ 目录页请求失败: {exc}")
         return None
 
-    meta = extract_meta(index_html)
+    meta = extract_meta(index_html, source=source)
     logger(f"小说信息: 标题={meta.title} | 作者={meta.author}")
     if to_simplified:
         if OPENCC.available:
@@ -583,7 +670,7 @@ def download_novel_payload(
         else:
             logger("❌ [警告] 未安装 opencc，暂无法自动繁转简（可 `pip install opencc-python-reimplemented`）")
 
-    chapters = discover_chapters(chapter_index_url, index_html, logger=logger)
+    chapters = discover_chapters(chapter_index_url, index_html, source=source, logger=logger)
     if not chapters:
         logger("❌ 未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
         return None
@@ -597,7 +684,13 @@ def download_novel_payload(
         return None
 
     logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
-    downloaded = download_chapters(selected, delay=max(delay, 0), logger=logger, to_simplified=to_simplified)
+    downloaded = download_chapters(
+        selected,
+        delay=max(delay, 0),
+        logger=logger,
+        to_simplified=to_simplified,
+        source=source,
+    )
     if not downloaded:
         logger("❌ 没有成功下载任何章节，未生成 EPUB。")
         return None
@@ -605,7 +698,7 @@ def download_novel_payload(
     cover_bytes = None
     cover_type = None
     cover_name = None
-    novel_url = build_novel_url(input_url)
+    novel_url = build_novel_url(input_url, source=source)
     if novel_url:
         try:
             novel_html = fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0)
@@ -669,8 +762,8 @@ def run_download(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="下载 alicesw 小说并导出成 EPUB")
-    parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html")
+    parser = argparse.ArgumentParser(description="下载 AliceSW/SilverNoelle 小说并导出成 EPUB")
+    parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html 或 https://silvernoelle.com/category/.../")
     parser.add_argument("-o", "--output", default="novel.epub", help="输出 EPUB 文件路径")
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")

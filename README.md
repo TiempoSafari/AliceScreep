@@ -1,6 +1,6 @@
 # AliceScreep
 
-用于下载 `https://www.alicesw.tw/` 小说并导出为 **EPUB**，支持图形界面（GUI），并提供更现代的 Windows 风格界面。
+用于下载 `https://www.alicesw.tw/` 与 `https://silvernoelle.com/` 的小说目录并导出为 **EPUB**，支持图形界面（GUI），并提供更现代的 Windows 风格界面。
 
 ## 图形界面（推荐）
 
@@ -16,12 +16,13 @@ python novel_downloader.py --gui
 python novel_downloader.py
 ```
 
-你可以输入以下两种链接（都支持）：
+你可以输入以下链接（都支持）：
 
-- 小说页：`https://www.alicesw.tw/novel/2735.html`
-- 章节目录页：`https://www.alicesw.tw/other/chapters/id/2735.html`
+- AliceSW 小说页：`https://www.alicesw.tw/novel/2735.html`
+- AliceSW 章节目录页：`https://www.alicesw.tw/other/chapters/id/2735.html`
+- SilverNoelle 分类目录页：`https://silvernoelle.com/category/.../`
 
-程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面。
+对 AliceSW，程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面；对 SilverNoelle，会按分类页文章列表提取章节并按发布时间从旧到新下载。
 
 默认流程为：**下载数据 → 打开编辑界面 → 修改章节名/封面 → 再保存 EPUB**。
 
