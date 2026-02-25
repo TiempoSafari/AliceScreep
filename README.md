@@ -4,7 +4,7 @@
 
 ## 图形界面（推荐）
 
-> GUI 当前使用 **PyQt6**。若首次运行失败，请先安装：`pip install PyQt6`。
+> GUI 当前使用 **PyQt5**。若首次运行失败，请先安装：`pip install PyQt5`。
 
 
 直接启动：

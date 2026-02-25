@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""多站点小说下载器：CLI + GUI 入口（PyQt6）。"""
+"""多站点小说下载器：CLI + GUI 入口（PyQt5）。"""
 
 from __future__ import annotations
 
@@ -25,9 +25,10 @@ def parse_args() -> argparse.Namespace:
 
 def launch_gui() -> int:
     try:
-        from PyQt6.QtCore import Qt, QThread, pyqtSignal
-        from PyQt6.QtGui import QFont
-        from PyQt6.QtWidgets import (
+        from PyQt5.QtCore import Qt, QThread, pyqtSignal
+        from PyQt5.QtGui import QFont
+        from PyQt5.QtWidgets import (
+            QAbstractItemView,
             QApplication,
             QButtonGroup,
             QDialog,
@@ -48,9 +49,9 @@ def launch_gui() -> int:
             QVBoxLayout,
             QWidget,
         )
-    except ImportError as exc:
+    except Exception as exc:
         print(f"GUI 启动失败：{exc}")
-        print("请安装 PyQt6：pip install PyQt6")
+        print("请安装 PyQt5：pip install PyQt5")
         return 1
 
     class S:
@@ -87,7 +88,7 @@ def launch_gui() -> int:
                     to_simplified=self.to_simplified,
                 )
                 self.done.emit(payload)
-            except Exception as exc:  # runtime guard
+            except Exception as exc:
                 self.failed.emit(str(exc))
 
     class Card(QFrame):
@@ -138,8 +139,8 @@ def launch_gui() -> int:
             ll.setContentsMargins(12, 12, 12, 12)
             ll.addWidget(QLabel("章节列表（可拖拽排序）"))
             self.chapter_list = QListWidget()
-            self.chapter_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-            self.chapter_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self.chapter_list.setDragDropMode(QAbstractItemView.InternalMove)
+            self.chapter_list.setDefaultDropAction(Qt.MoveAction)
             self.chapter_list.currentRowChanged.connect(self.on_select)
             ll.addWidget(self.chapter_list, 1)
             body.addWidget(list_card, 1)
@@ -200,28 +201,25 @@ def launch_gui() -> int:
             self.chapter_list.clear()
             for i, ch in enumerate(self.payload.chapters, 1):
                 item = QListWidgetItem(f"{i:03d}. {ch.title}")
-                item.setData(Qt.ItemDataRole.UserRole, ch)
+                item.setData(Qt.UserRole, ch)
                 self.chapter_list.addItem(item)
             if self.chapter_list.count() > 0:
                 self.chapter_list.setCurrentRow(max(0, min(select, self.chapter_list.count() - 1)))
 
         def on_select(self, row: int) -> None:
             if row >= 0:
-                ch = self.chapter_list.item(row).data(Qt.ItemDataRole.UserRole)
+                ch = self.chapter_list.item(row).data(Qt.UserRole)
                 self.single_title.setText(ch.title)
 
         def _sync_order_from_list(self) -> None:
-            reordered = []
-            for i in range(self.chapter_list.count()):
-                reordered.append(self.chapter_list.item(i).data(Qt.ItemDataRole.UserRole))
-            self.payload.chapters = reordered
+            self.payload.chapters = [self.chapter_list.item(i).data(Qt.UserRole) for i in range(self.chapter_list.count())]
 
         def apply_single(self) -> None:
             row = self.chapter_list.currentRow()
             if row < 0:
                 QMessageBox.warning(self, "提示", "请先选择章节")
                 return
-            ch = self.chapter_list.item(row).data(Qt.ItemDataRole.UserRole)
+            ch = self.chapter_list.item(row).data(Qt.UserRole)
             ch.title = normalize_chapter_title(self.single_title.text())
             self._sync_order_from_list()
             self.refresh_chapter_list(row)
@@ -315,8 +313,8 @@ def launch_gui() -> int:
             outer.setSpacing(10)
 
             title = QLabel("小说下载与编辑工作台")
-            title.setFont(QFont("Microsoft YaHei", 20, QFont.Weight.Bold))
-            subtitle = QLabel("PyQt6 扁平化圆角卡片风格 · 支持拖拽排序 / 正则批量改名 / 封面替换")
+            title.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
+            subtitle = QLabel("PyQt5 扁平化圆角卡片风格 · 支持拖拽排序 / 正则批量改名 / 封面替换")
             subtitle.setStyleSheet(f"color:{S.SUB};")
             outer.addWidget(title)
             outer.addWidget(subtitle)
@@ -351,7 +349,6 @@ def launch_gui() -> int:
             g.addWidget(self.delay_edit, 2, 5)
             g.addWidget(self.simplified, 3, 1, 1, 3)
             g.setColumnStretch(1, 1)
-            g.setColumnStretch(4, 0)
             outer.addWidget(card)
 
             mid = QHBoxLayout()
@@ -457,7 +454,7 @@ def launch_gui() -> int:
                 self.output_edit.setText(str(Path(output_path).with_name(safe_filename(payload.meta.title))))
 
             dlg = ChapterEditor(payload, self.output_edit.text(), self.output_edit, self)
-            if dlg.exec():
+            if dlg.exec_():
                 save_payload_to_epub(payload, Path(self.output_edit.text()), logger=self.append_log)
                 self.status.setText("导出完成")
                 QMessageBox.information(self, "完成", "下载完成，已编辑并生成 EPUB。")
@@ -468,7 +465,7 @@ def launch_gui() -> int:
     app.setFont(QFont("Microsoft YaHei", 10))
     w = MainWindow()
     w.show()
-    return app.exec()
+    return app.exec_()
 
 
 def main() -> int:
