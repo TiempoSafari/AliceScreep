@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -8,13 +9,31 @@ from pathlib import Path
 
 from .models import ChapterContent, NovelMeta
 
+RUBY_TOKEN_RE = re.compile(r"⟦RUBY:(.*?)\|(.*?)⟧")
+
+
+def _render_text_with_ruby(text: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for match in RUBY_TOKEN_RE.finditer(text):
+        start, end = match.span()
+        if start > cursor:
+            parts.append(html.escape(text[cursor:start]))
+        base = html.escape(match.group(1))
+        annotation = html.escape(match.group(2))
+        parts.append(f"<ruby>{base}<rt>{annotation}</rt></ruby>")
+        cursor = end
+    if cursor < len(text):
+        parts.append(html.escape(text[cursor:]))
+    return "".join(parts)
+
 
 def to_xhtml_paragraphs(text: str) -> str:
     lines = [line.strip() for line in text.splitlines()]
     paragraphs = [line for line in lines if line]
     if not paragraphs:
         return "<p></p>"
-    return "\n".join(f"<p>{html.escape(p)}</p>" for p in paragraphs)
+    return "\n".join(f"<p>{_render_text_with_ruby(p)}</p>" for p in paragraphs)
 
 
 def build_epub(
