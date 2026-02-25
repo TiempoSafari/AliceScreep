@@ -1,677 +1,24 @@
 #!/usr/bin/env python3
-"""下载 alicesw 小说目录并导出为 EPUB（含 GUI）。"""
+"""多站点小说下载器：CLI + GUI 入口（PyQt5）。"""
 
 from __future__ import annotations
 
 import argparse
-import html
+import base64
+import json
+import os
 import re
-import sys
-import time
-import uuid
-import zipfile
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from html.parser import HTMLParser
 from pathlib import Path
-from threading import Thread
-from typing import Callable, Iterable, List, Optional
-from urllib.error import URLError
-from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
 
-try:
-    from opencc import OpenCC
-except Exception:  # optional dependency
-    OpenCC = None
-
-
-class OpenCCConverter:
-    def __init__(self) -> None:
-        self._converter = None
-        if OpenCC is not None:
-            try:
-                self._converter = OpenCC("t2s")
-            except Exception:
-                self._converter = None
-
-    @property
-    def available(self) -> bool:
-        return self._converter is not None
-
-    def convert(self, text: str) -> str:
-        if not self._converter:
-            return text
-        return self._converter.convert(text)
-
-
-OPENCC = OpenCCConverter()
-
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0.0.0 Safari/537.36"
-)
-
-
-@dataclass
-class Chapter:
-    title: str
-    url: str
-    order: int = sys.maxsize
-
-
-@dataclass
-class ChapterContent:
-    title: str
-    content: str
-    source_url: str
-
-
-@dataclass
-class NovelMeta:
-    title: str
-    author: str
-    language: str = "zh-Hant"
-
-
-@dataclass
-class DownloadPayload:
-    meta: NovelMeta
-    chapters: list[ChapterContent]
-    cover_bytes: bytes | None
-    cover_type: str | None
-    cover_name: str | None
-
-
-class AnchorParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.links: list[tuple[str, str]] = []
-        self._href: str | None = None
-        self._text_parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "a":
-            return
-        attr_map = dict(attrs)
-        self._href = attr_map.get("href")
-        self._text_parts = []
-
-    def handle_data(self, data: str) -> None:
-        if self._href is not None:
-            self._text_parts.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag != "a" or self._href is None:
-            return
-        text = "".join(self._text_parts).strip()
-        if self._href:
-            self.links.append((self._href, text))
-        self._href = None
-        self._text_parts = []
-
-
-def fetch_bytes(url: str, timeout: int = 30) -> bytes:
-    req = Request(url, headers={"User-Agent": UA})
-    with urlopen(req, timeout=timeout) as resp:
-        return resp.read()
-
-
-def fetch_html(url: str, timeout: int = 30) -> str:
-    raw = fetch_bytes(url, timeout=timeout)
-    for encoding in ("utf-8", "gb18030", "big5"):
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="ignore")
-
-
-
-
-def fetch_html_with_retry(
-    url: str,
-    logger: Callable[[str], None] | None = None,
-    retries: int = 2,
-    wait_seconds: float = 0.8,
-) -> str:
-    last_exc: Exception | None = None
-    for attempt in range(1, retries + 2):
-        try:
-            return fetch_html(url)
-        except (URLError, TimeoutError, OSError, ValueError) as exc:
-            last_exc = exc
-            if attempt > retries:
-                break
-            if logger:
-                logger(f"❌ [警告] 请求失败，准备重试({attempt}/{retries}): {url} | 错误: {exc}")
-            time.sleep(wait_seconds)
-
-    assert last_exc is not None
-    raise last_exc
-def sanitize_url(raw_url: str, base_url: str = "") -> Optional[str]:
-    """清理并规范化 URL，避免被当作本地文件路径打开。"""
-    candidate = html.unescape(raw_url or "").strip()
-    if not candidate:
-        return None
-
-    if base_url:
-        candidate = urljoin(base_url, candidate)
-
-    parsed = urlparse(candidate)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-
-    path = quote(unquote(parsed.path), safe="/%:@-._~!$&'()*+,;=")
-    query = quote(unquote(parsed.query), safe="=&/%:@-._~!$'()*+,;?")
-    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, query, ""))
-
-
-def strip_tags(content_html: str) -> str:
-    content_html = re.sub(r"<br\s*/?>", "\n", content_html, flags=re.IGNORECASE)
-    content_html = re.sub(r"</p\s*>", "\n\n", content_html, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", content_html)
-    text = html.unescape(text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-
-
-def normalize_chapter_title(raw_title: str) -> str:
-    title = html.unescape((raw_title or "").strip())
-    if not title:
-        return "未知章节"
-
-    # 站点常见尾巴："_...-愛麗絲書屋 (ALICESW.COM) - ..."
-    title = re.sub(r"[\s_\-]*(?:愛麗絲書屋|ALICESW\.COM).*$", "", title, flags=re.IGNORECASE)
-
-    # 常见模式："章节名_副标题"，优先保留章节主标题
-    if "_" in title:
-        left, right = title.split("_", 1)
-        if re.search(r"第\s*\d+\s*章", left) and len(right) > 3:
-            title = left
-
-    title = re.sub(r"\s+", " ", title).strip(" _-")
-    return title or "未知章节"
-
-
-def extract_title(page_html: str) -> str:
-    for pattern in (r"<h1[^>]*>(.*?)</h1>", r"<title[^>]*>(.*?)</title>"):
-        match = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
-        if match:
-            return strip_tags(match.group(1))
-    return "未知标题"
-
-
-def extract_content(page_html: str) -> str:
-    patterns = (
-        r'<div[^>]+id=["\']content["\'][^>]*>(.*?)</div>',
-        r'<div[^>]+class=["\'][^"\']*content[^"\']*["\'][^>]*>(.*?)</div>',
-        r'<article[^>]*>(.*?)</article>',
-    )
-    for pattern in patterns:
-        match = re.search(pattern, page_html, flags=re.IGNORECASE | re.DOTALL)
-        if match:
-            text = strip_tags(match.group(1))
-            if len(text) > 60:
-                return text
-
-    body = re.search(r"<body[^>]*>(.*?)</body>", page_html, flags=re.IGNORECASE | re.DOTALL)
-    if not body:
-        return ""
-    return strip_tags(body.group(1))
-
-
-def extract_chapter_order(title: str, url: str) -> int:
-    title_match = re.search(r"第\s*(\d+)\s*章", title)
-    if title_match:
-        return int(title_match.group(1))
-
-    url_match = re.search(r"(\d+)(?=\.html(?:$|\?))", url)
-    if url_match:
-        return int(url_match.group(1))
-    return sys.maxsize
-
-
-def extract_novel_id(url: str) -> str:
-    path = urlparse(url).path
-    patterns = (r"/novel/(\d+)\.html", r"/other/chapters/id/(\d+)\.html")
-    for pattern in patterns:
-        match = re.search(pattern, path)
-        if match:
-            return match.group(1)
-    return ""
-
-
-def build_chapter_index_url(input_url: str) -> Optional[str]:
-    parsed = urlparse(input_url)
-    if not parsed.scheme or not parsed.netloc:
-        return None
-    novel_id = extract_novel_id(input_url)
-    if not novel_id:
-        return None
-    return f"{parsed.scheme}://{parsed.netloc}/other/chapters/id/{novel_id}.html"
-
-
-def build_novel_url(input_url: str) -> Optional[str]:
-    parsed = urlparse(input_url)
-    if not parsed.scheme or not parsed.netloc:
-        return None
-    novel_id = extract_novel_id(input_url)
-    if not novel_id:
-        return None
-    return f"{parsed.scheme}://{parsed.netloc}/novel/{novel_id}.html"
-
-
-def pick_chapter_list_html(page_html: str) -> str:
-    match = re.search(
-        r'<ul[^>]+class=["\'][^"\']*mulu_list[^"\']*["\'][^>]*>(.*?)</ul>',
-        page_html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if match:
-        return match.group(1)
-    return page_html
-
-
-def discover_chapters(index_url: str, html_text: str, logger: Callable[[str], None] = print) -> List[Chapter]:
-    chapter_area = pick_chapter_list_html(html_text)
-    parser = AnchorParser()
-    parser.feed(chapter_area)
-
-    parsed_index = urlparse(index_url)
-    links_found = len(parser.links)
-    chapters: list[Chapter] = []
-    seen: set[str] = set()
-    skipped_non_html = 0
-    skipped_cross_site = 0
-    skipped_non_book = 0
-
-    for href, text in parser.links:
-        normalized = sanitize_url(href, base_url=index_url)
-        if not normalized:
-            skipped_non_html += 1
-            continue
-
-        absolute_url = normalized.split("#", 1)[0]
-        parsed_abs = urlparse(absolute_url)
-
-        if parsed_abs.netloc and parsed_abs.netloc != parsed_index.netloc:
-            skipped_cross_site += 1
-            continue
-        if not parsed_abs.path.lower().endswith(".html"):
-            skipped_non_html += 1
-            continue
-        if "/book/" not in parsed_abs.path:
-            skipped_non_book += 1
-            continue
-
-        if absolute_url in seen:
-            continue
-        seen.add(absolute_url)
-
-        title = text.strip() or parsed_abs.path.rsplit("/", 1)[-1].replace(".html", "")
-        order = extract_chapter_order(title, absolute_url)
-        chapters.append(Chapter(title=title, url=absolute_url, order=order))
-
-    chapters.sort(key=lambda c: (c.order, c.url))
-    logger(
-        "章节解析完成："
-        f"候选链接 {links_found}，"
-        f"有效章节 {len(chapters)}，"
-        f"过滤(跨站={skipped_cross_site}, 非html={skipped_non_html}, 非/book/={skipped_non_book})"
-    )
-    return chapters
-
-
-def extract_meta(index_html: str, fallback_title: str = "未命名小说") -> NovelMeta:
-    title = fallback_title
-    author = "未知作者"
-
-    title_match = re.search(r"<div[^>]+class=[\"']mu_h1[\"'][^>]*>\s*<h1[^>]*>(.*?)</h1>", index_html, re.I | re.S)
-    if title_match:
-        title = strip_tags(title_match.group(1))
-    else:
-        title = extract_title(index_html)
-
-    author_match = re.search(r"作者：\s*<a[^>]*>(.*?)</a>", index_html, re.I | re.S)
-    if author_match:
-        author = strip_tags(author_match.group(1))
-
-    return NovelMeta(title=title or fallback_title, author=author or "未知作者")
-
-
-def extract_cover_url(page_html: str, base_url: str) -> Optional[str]:
-    patterns = (
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<img[^>]+class=["\'][^"\']*(?:book|cover|pic)[^"\']*["\'][^>]+src=["\']([^"\']+)["\']',
-        r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>',
-    )
-    for pattern in patterns:
-        m = re.search(pattern, page_html, re.I | re.S)
-        if not m:
-            continue
-        normalized = sanitize_url(m.group(1), base_url=base_url)
-        if normalized:
-            return normalized
-    return None
-
-
-def fetch_cover_bytes(cover_url: str) -> tuple[bytes, str, str]:
-    data = fetch_bytes(cover_url)
-    lower = cover_url.lower()
-    if lower.endswith(".png"):
-        return data, "image/png", "cover.png"
-    return data, "image/jpeg", "cover.jpg"
-
-
-def to_xhtml_paragraphs(text: str) -> str:
-    lines = [line.strip() for line in text.splitlines()]
-    paragraphs = [line for line in lines if line]
-    if not paragraphs:
-        return "<p></p>"
-    return "\n".join(f"<p>{html.escape(p)}</p>" for p in paragraphs)
-
-
-def build_epub(
-    output_file: Path,
-    meta: NovelMeta,
-    chapters: list[ChapterContent],
-    cover_bytes: bytes | None,
-    cover_media_type: str | None,
-    cover_name: str | None,
-) -> None:
-    book_id = f"urn:uuid:{uuid.uuid4()}"
-    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-    manifest_items: list[str] = [
-        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
-        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
-    ]
-    spine_items: list[str] = []
-    nav_points: list[str] = []
-    nav_links: list[str] = []
-
-    if cover_bytes and cover_media_type and cover_name:
-        manifest_items.append(
-            f'<item id="cover-image" href="images/{cover_name}" media-type="{cover_media_type}" properties="cover-image"/>'
-        )
-        manifest_items.append('<item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml"/>')
-        spine_items.append('<itemref idref="cover-page"/>')
-
-    for idx, _chapter in enumerate(chapters, start=1):
-        manifest_items.append(f'<item id="chap{idx}" href="text/chapter{idx}.xhtml" media-type="application/xhtml+xml"/>')
-        spine_items.append(f'<itemref idref="chap{idx}"/>')
-        nav_points.append(
-            f'''<navPoint id="navPoint-{idx}" playOrder="{idx}">
-      <navLabel><text>{html.escape(chapters[idx-1].title)}</text></navLabel>
-      <content src="text/chapter{idx}.xhtml"/>
-    </navPoint>'''
-        )
-        nav_links.append(f'<li><a href="text/chapter{idx}.xhtml">{html.escape(chapters[idx-1].title)}</a></li>')
-
-    opf = f'''<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="bookid">{book_id}</dc:identifier>
-    <dc:title>{html.escape(meta.title)}</dc:title>
-    <dc:creator>{html.escape(meta.author)}</dc:creator>
-    <dc:language>{meta.language}</dc:language>
-    <dc:date>{now_iso}</dc:date>
-    <meta property="dcterms:modified">{now_iso}</meta>
-  </metadata>
-  <manifest>
-    {''.join(manifest_items)}
-  </manifest>
-  <spine toc="ncx">
-    {''.join(spine_items)}
-  </spine>
-</package>
-'''
-
-    toc_ncx = f'''<?xml version="1.0" encoding="UTF-8"?>
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content="{book_id}"/>
-    <meta name="dtb:depth" content="1"/>
-    <meta name="dtb:totalPageCount" content="0"/>
-    <meta name="dtb:maxPageNumber" content="0"/>
-  </head>
-  <docTitle><text>{html.escape(meta.title)}</text></docTitle>
-  <navMap>
-    {''.join(nav_points)}
-  </navMap>
-</ncx>
-'''
-
-    nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="zh-Hant">
-<head><title>目录</title></head>
-<body>
-  <nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops">
-    <h1>{html.escape(meta.title)}</h1>
-    <ol>
-      {''.join(nav_links)}
-    </ol>
-  </nav>
-</body>
-</html>
-'''
-
-    with zipfile.ZipFile(output_file, "w") as zf:
-        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-        zf.writestr(
-            "META-INF/container.xml",
-            """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">
-  <rootfiles>
-    <rootfile full-path=\"OEBPS/content.opf\" media-type=\"application/oebps-package+xml\"/>
-  </rootfiles>
-</container>
-""",
-        )
-
-        zf.writestr("OEBPS/content.opf", opf)
-        zf.writestr("OEBPS/toc.ncx", toc_ncx)
-        zf.writestr("OEBPS/nav.xhtml", nav_xhtml)
-
-        if cover_bytes and cover_media_type and cover_name:
-            cover_page = f'''<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>封面</title></head>
-<body>
-  <div style="text-align:center; margin:0; padding:0;">
-    <img src="images/{cover_name}" alt="cover" style="max-width:100%; height:auto;"/>
-  </div>
-</body>
-</html>
-'''
-            zf.writestr("OEBPS/cover.xhtml", cover_page)
-            zf.writestr(f"OEBPS/images/{cover_name}", cover_bytes)
-
-        for idx, chapter in enumerate(chapters, start=1):
-            chapter_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="zh-Hant">
-<head><title>{html.escape(chapter.title)}</title></head>
-<body>
-  <h1>{html.escape(chapter.title)}</h1>
-  {to_xhtml_paragraphs(chapter.content)}
-</body>
-</html>
-'''
-            zf.writestr(f"OEBPS/text/chapter{idx}.xhtml", chapter_xhtml)
-
-
-def maybe_convert_to_simplified(text: str, enabled: bool) -> str:
-    if not enabled:
-        return text
-    return OPENCC.convert(text)
-
-
-def download_chapters(
-    chapters: Iterable[Chapter],
-    delay: float = 0.2,
-    logger: Callable[[str], None] = print,
-    to_simplified: bool = True,
-) -> list[ChapterContent]:
-    results: list[ChapterContent] = []
-
-    for idx, chapter in enumerate(chapters, start=1):
-        chapter_url = sanitize_url(chapter.url)
-        if not chapter_url:
-            logger(f"❌ [警告] 跳过非法章节链接: {chapter.url}")
-            continue
-
-        logger(f"[{idx}] 下载中: {chapter.title} -> {chapter_url}")
-        try:
-            chapter_html = fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0)
-        except (URLError, ValueError, OSError) as exc:
-            logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
-            continue
-
-        page_title = extract_title(chapter_html)
-        title = normalize_chapter_title(chapter.title or page_title)
-        if title == "未知章节":
-            title = normalize_chapter_title(page_title)
-
-        content = extract_content(chapter_html)
-        if not content:
-            logger(f"❌ [警告] 正文提取失败，已跳过: {chapter_url}")
-            continue
-
-        title = maybe_convert_to_simplified(title, to_simplified)
-        content = maybe_convert_to_simplified(content, to_simplified)
-
-        results.append(ChapterContent(title=title, content=content, source_url=chapter_url))
-        logger(f"✅ 下载成功: {title}")
-        time.sleep(delay)
-
-    return results
-
-
-def download_novel_payload(
-    input_url: str,
-    start: int,
-    end: int,
-    delay: float,
-    logger: Callable[[str], None] = print,
-    to_simplified: bool = True,
-) -> DownloadPayload | None:
-    logger(f"输入链接: {input_url}")
-
-    chapter_index_url = build_chapter_index_url(input_url)
-    if chapter_index_url:
-        logger(f"使用章节目录页: {chapter_index_url}")
-    else:
-        logger("❌ [警告] 无法自动识别小说ID，将直接使用输入链接作为目录页。")
-        chapter_index_url = input_url
-
-    try:
-        index_html = fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0)
-    except URLError as exc:
-        logger(f"❌ 目录页请求失败: {exc}")
-        return None
-
-    meta = extract_meta(index_html)
-    logger(f"小说信息: 标题={meta.title} | 作者={meta.author}")
-    if to_simplified:
-        if OPENCC.available:
-            logger("✅ 已启用繁体转简体（OpenCC t2s）")
-        else:
-            logger("❌ [警告] 未安装 opencc，暂无法自动繁转简（可 `pip install opencc-python-reimplemented`）")
-
-    chapters = discover_chapters(chapter_index_url, index_html, logger=logger)
-    if not chapters:
-        logger("❌ 未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
-        return None
-
-    safe_start = max(start, 1)
-    safe_end = end if end > 0 else len(chapters)
-    selected = chapters[safe_start - 1 : safe_end]
-
-    if not selected:
-        logger("❌ 筛选后没有章节，请检查起始章节/结束章节。")
-        return None
-
-    logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
-    downloaded = download_chapters(selected, delay=max(delay, 0), logger=logger, to_simplified=to_simplified)
-    if not downloaded:
-        logger("❌ 没有成功下载任何章节，未生成 EPUB。")
-        return None
-
-    cover_bytes = None
-    cover_type = None
-    cover_name = None
-    novel_url = build_novel_url(input_url)
-    if novel_url:
-        try:
-            novel_html = fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0)
-            cover_url = extract_cover_url(novel_html, base_url=novel_url)
-            if cover_url:
-                cover_bytes, cover_type, cover_name = fetch_cover_bytes(cover_url)
-                logger(f"✅ 已获取封面图: {cover_url}")
-            else:
-                logger("❌ [警告] 未找到封面图，将生成无封面 EPUB。")
-        except Exception as exc:
-            logger(f"❌ [警告] 获取封面失败，将生成无封面 EPUB: {exc}")
-
-    if to_simplified:
-        meta.title = maybe_convert_to_simplified(meta.title, True)
-        meta.author = maybe_convert_to_simplified(meta.author, True)
-
-    return DownloadPayload(
-        meta=meta,
-        chapters=downloaded,
-        cover_bytes=cover_bytes,
-        cover_type=cover_type,
-        cover_name=cover_name,
-    )
-
-
-def save_payload_to_epub(
-    payload: DownloadPayload,
-    output_file: Path,
-    logger: Callable[[str], None] = print,
-) -> int:
-    if output_file.suffix.lower() != ".epub":
-        output_file = output_file.with_suffix(".epub")
-        logger(f"输出格式已切换为 EPUB: {output_file}")
-
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    build_epub(
-        output_file,
-        payload.meta,
-        payload.chapters,
-        payload.cover_bytes,
-        payload.cover_type,
-        payload.cover_name,
-    )
-    logger(f"✅ 完成：共写入 {len(payload.chapters)} 章 -> {output_file}")
-    return 0
-
-
-def run_download(
-    input_url: str,
-    output_file: Path,
-    start: int,
-    end: int,
-    delay: float,
-    logger: Callable[[str], None] = print,
-    to_simplified: bool = True,
-) -> int:
-    payload = download_novel_payload(input_url, start, end, delay, logger=logger, to_simplified=to_simplified)
-    if payload is None:
-        return 1
-    return save_payload_to_epub(payload, output_file, logger=logger)
+from downloader import DownloadPayload, download_novel_payload, normalize_chapter_title, run_download, save_payload_to_epub
+from downloader.models import ChapterContent, NovelMeta
+from downloader.text import safe_filename
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="下载 alicesw 小说并导出成 EPUB")
-    parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html")
-    parser.add_argument("-o", "--output", default="novel.epub", help="输出 EPUB 文件路径")
+    parser = argparse.ArgumentParser(description="下载 AliceSW/SilverNoelle 小说并导出成 EPUB")
+    parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html 或 https://silvernoelle.com/category/.../")
+    parser.add_argument("-o", "--output", default=str(DEFAULT_OUTPUT_FILE), help="输出 EPUB 文件路径（默认 output/novel.epub，自动可按书名命名）")
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")
     parser.add_argument("--end", type=int, default=0, help="结束章节（0 表示到最后）")
@@ -680,282 +27,782 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+DEFAULT_OUTPUT_DIR = Path.cwd() / "output"
+DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "novel.epub"
+DEFAULT_STASH_DIR = DEFAULT_OUTPUT_DIR / "stash"
+
+
+def _ensure_output_dirs() -> None:
+    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_STASH_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_payload_stash(path: Path, payload: DownloadPayload) -> None:
+    data = {
+        "version": 1,
+        "meta": {
+            "title": payload.meta.title,
+            "author": payload.meta.author,
+            "language": payload.meta.language,
+        },
+        "chapters": [
+            {"title": c.title, "content": c.content, "source_url": c.source_url}
+            for c in payload.chapters
+        ],
+        "cover": {
+            "bytes_b64": base64.b64encode(payload.cover_bytes).decode("ascii") if payload.cover_bytes else None,
+            "type": payload.cover_type,
+            "name": payload.cover_name,
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_payload_stash(path: Path) -> DownloadPayload:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    meta_data = data.get("meta", {})
+    meta = NovelMeta(
+        title=meta_data.get("title", "未命名小说"),
+        author=meta_data.get("author", "未知作者"),
+        language=meta_data.get("language", "zh-Hant"),
+    )
+    chapters = [
+        ChapterContent(
+            title=item.get("title", "未知章节"),
+            content=item.get("content", ""),
+            source_url=item.get("source_url", ""),
+        )
+        for item in data.get("chapters", [])
+    ]
+    cover_data = data.get("cover", {})
+    cover_b64 = cover_data.get("bytes_b64")
+    cover_bytes = base64.b64decode(cover_b64) if cover_b64 else None
+    return DownloadPayload(
+        meta=meta,
+        chapters=chapters,
+        cover_bytes=cover_bytes,
+        cover_type=cover_data.get("type"),
+        cover_name=cover_data.get("name"),
+    )
+
+
 def launch_gui() -> int:
     try:
-        import tkinter as tk
-        from tkinter import filedialog, messagebox, ttk
-        from tkinter.scrolledtext import ScrolledText
-    except Exception as exc:
-        print(f"GUI 启动失败：{exc}")
-        return 1
-
-    try:
-        root = tk.Tk()
-    except Exception as exc:
-        print(f"GUI 启动失败：{exc}")
-        return 1
-
-    root.title("AliceSW 小说下载器")
-    root.geometry("920x700")
-    root.configure(bg="#f4f6fb")
-
-    style = ttk.Style(root)
-    for theme in ("vista", "xpnative", "clam"):
-        if theme in style.theme_names():
-            style.theme_use(theme)
-            break
-
-    style.configure("Title.TLabel", font=("Segoe UI", 15, "bold"), foreground="#1f2a44")
-    style.configure("Sub.TLabel", font=("Segoe UI", 10), foreground="#5a6579")
-    style.configure("TButton", font=("Segoe UI", 10))
-    style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
-
-    container = ttk.Frame(root, padding=16)
-    container.pack(fill="both", expand=True)
-
-    header = ttk.Frame(container)
-    header.pack(fill="x", pady=(0, 8))
-    ttk.Label(header, text="AliceSW EPUB 下载器", style="Title.TLabel").pack(anchor="w")
-    ttk.Label(header, text="下载 → 编辑章节名/封面 → 保存 EPUB", style="Sub.TLabel").pack(anchor="w")
-
-    card = ttk.Frame(container, padding=12)
-    card.pack(fill="x", pady=(6, 8))
-
-    ttk.Label(card, text="小说链接").grid(row=0, column=0, sticky="w")
-    url_var = tk.StringVar(value="https://www.alicesw.tw/novel/2735.html")
-    ttk.Entry(card, textvariable=url_var, width=88).grid(row=0, column=1, columnspan=4, sticky="we", pady=4)
-
-    ttk.Label(card, text="输出文件").grid(row=1, column=0, sticky="w")
-    output_var = tk.StringVar(value=str(Path.cwd() / "novel.epub"))
-    ttk.Entry(card, textvariable=output_var, width=68).grid(row=1, column=1, columnspan=3, sticky="we", pady=4)
-
-    def choose_output() -> None:
-        path = filedialog.asksaveasfilename(
-            title="选择输出 EPUB 文件",
-            defaultextension=".epub",
-            filetypes=[("EPUB", "*.epub"), ("All files", "*.*")],
+        import PyQt5
+        from PyQt5.QtCore import QLibraryInfo, Qt, QThread, pyqtSignal
+        from PyQt5.QtGui import QColor, QFont, QPixmap
+        from PyQt5.QtWidgets import (
+            QAbstractItemView,
+            QApplication,
+            QButtonGroup,
+            QDialog,
+            QFileDialog,
+            QFrame,
+            QGraphicsDropShadowEffect,
+            QGridLayout,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QListWidget,
+            QListWidgetItem,
+            QMainWindow,
+            QMessageBox,
+            QPushButton,
+            QProgressBar,
+            QRadioButton,
+            QTextEdit,
+            QVBoxLayout,
+            QWidget,
         )
-        if path:
-            output_var.set(path)
+    except Exception as exc:
+        print(f"GUI 启动失败：{exc}")
+        print("请安装 PyQt5：pip install PyQt5")
+        return 1
 
-    ttk.Button(card, text="浏览", command=choose_output).grid(row=1, column=4, padx=(6, 0))
 
-    ttk.Label(card, text="起始章节").grid(row=2, column=0, sticky="w")
-    start_var = tk.StringVar(value="1")
-    ttk.Entry(card, textvariable=start_var, width=10).grid(row=2, column=1, sticky="w", pady=4)
+    def _configure_qt_runtime() -> None:
+        """尽量自动修复 Qt platform plugin 初始化失败问题。"""
+        plugin_candidates: list[Path] = []
+        try:
+            qt_plugins = Path(QLibraryInfo.location(QLibraryInfo.PluginsPath))
+            plugin_candidates.append(qt_plugins / "platforms")
+        except Exception:
+            pass
 
-    ttk.Label(card, text="结束章节(0=最后)").grid(row=2, column=2, sticky="e")
-    end_var = tk.StringVar(value="0")
-    ttk.Entry(card, textvariable=end_var, width=10).grid(row=2, column=3, sticky="w", pady=4)
+        pyqt_root = Path(PyQt5.__file__).resolve().parent
+        plugin_candidates.extend(
+            [
+                pyqt_root / "Qt5" / "plugins" / "platforms",
+                pyqt_root / "Qt" / "plugins" / "platforms",
+                pyqt_root / "plugins" / "platforms",
+            ]
+        )
 
-    ttk.Label(card, text="章节间隔(秒)").grid(row=2, column=4, sticky="e")
-    delay_var = tk.StringVar(value="0.5")
-    ttk.Entry(card, textvariable=delay_var, width=8).grid(row=2, column=5, sticky="w", padx=(6, 0), pady=4)
+        for candidate in plugin_candidates:
+            if candidate.exists():
+                os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(candidate))
+                break
 
-    simplified_var = tk.BooleanVar(value=True)
-    ttk.Checkbutton(card, text="保存前繁体转简体", variable=simplified_var).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        # Windows 常见问题：找不到 Qt 依赖 DLL，给 PATH 补充几个候选目录
+        if os.name == "nt":
+            dll_dirs: list[Path] = []
+            for parent in [pyqt_root / "Qt5", pyqt_root / "Qt", pyqt_root]:
+                dll_dirs.extend([parent / "bin", parent])
+            old_path = os.environ.get("PATH", "")
+            prefix = os.pathsep.join(str(d) for d in dll_dirs if d.exists())
+            if prefix:
+                os.environ["PATH"] = prefix + (os.pathsep + old_path if old_path else "")
+            os.environ.setdefault("QT_QPA_PLATFORM", "windows")
 
-    card.columnconfigure(1, weight=1)
-    card.columnconfigure(3, weight=1)
+    class S:
+        BG = "#edf2f8"
+        CARD = "#ffffff"
+        PRIMARY = "#2f6fed"
+        PRIMARY_H = "#3e7cff"
+        TEXT = "#1b2940"
+        SUB = "#667085"
+        LOG_BG = "#0b1220"
+        LOG_TXT = "#cfe7ff"
 
-    progress = ttk.Progressbar(container, mode="indeterminate")
-    progress.pack(fill="x", pady=(0, 8))
+    class DownloadWorker(QThread):
+        log = pyqtSignal(str)
+        done = pyqtSignal(object)
+        failed = pyqtSignal(str)
+        progress = pyqtSignal(int, int)
 
-    log_box = ScrolledText(container, height=23, font=("Consolas", 10), bg="#0f172a", fg="#e2e8f0", insertbackground="#e2e8f0")
-    log_box.pack(fill="both", expand=True, pady=(0, 10))
-    log_box.tag_config("error", foreground="#ff6b6b")
-    log_box.tag_config("success", foreground="#4ade80")
-    log_box.tag_config("info", foreground="#cbd5e1")
+        def __init__(self, url: str, start: int, end: int, delay: float, to_simplified: bool) -> None:
+            super().__init__()
+            self.url = url
+            self.start_idx = start
+            self.end_idx = end
+            self.delay = delay
+            self.to_simplified = to_simplified
 
-    footer = ttk.Frame(container)
-    footer.pack(fill="x")
+        def run(self) -> None:
+            try:
+                payload = download_novel_payload(
+                    self.url,
+                    self.start_idx,
+                    self.end_idx,
+                    self.delay,
+                    logger=lambda m: self.log.emit(m),
+                    to_simplified=self.to_simplified,
+                    progress_callback=lambda cur, total: self.progress.emit(cur, total),
+                )
+                self.done.emit(payload)
+            except Exception as exc:
+                self.failed.emit(str(exc))
 
-    downloading = {"active": False}
+    class Card(QFrame):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setObjectName("card")
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(28)
+            shadow.setOffset(0, 8)
+            shadow.setColor(QColor(19, 33, 68, 28))
+            self.setGraphicsEffect(shadow)
 
-    def log(msg: str) -> None:
-        def _append() -> None:
-            tag = "info"
-            if "❌" in msg or "[警告]" in msg:
-                tag = "error"
-            elif "✅" in msg:
-                tag = "success"
-            log_box.insert("end", msg + "\n", tag)
-            log_box.see("end")
+    class ChapterEditor(QDialog):
+        def __init__(self, payload: DownloadPayload, output_path: str, output_edit: QLineEdit, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.payload = payload
+            self.output_path = output_path
+            self.output_edit = output_edit
+            self.stash_requested = False
+            self.last_stash_path: Path | None = None
+            self.setWindowTitle("编辑章节与封面")
+            self.resize(1060, 760)
 
-        root.after(0, _append)
+            root = QVBoxLayout(self)
+            root.setContentsMargins(14, 14, 14, 14)
+            root.setSpacing(10)
 
-    def set_running(active: bool) -> None:
-        downloading["active"] = active
-        if active:
-            progress.start(10)
-        else:
-            progress.stop()
+            info_card = Card()
+            info_l = QGridLayout(info_card)
+            info_l.setContentsMargins(12, 12, 12, 12)
 
-    def open_editor(payload: DownloadPayload, output_path: str) -> bool:
-        editor = tk.Toplevel(root)
-        editor.title("编辑章节与封面")
-        editor.geometry("860x620")
-        editor.transient(root)
-        editor.grab_set()
+            self.title_edit = QLineEdit(payload.meta.title)
+            self.author_edit = QLineEdit(payload.meta.author)
+            self.cover_label = QLabel(payload.cover_name or "(当前无封面)")
+            self.cover_preview = QLabel()
+            self.cover_preview.setFixedSize(120, 160)
+            self.cover_preview.setAlignment(Qt.AlignCenter)
+            self.cover_preview.setStyleSheet("background:#f3f6fb; border:1px solid #d5dfef; border-radius:8px;")
+            cover_btn = QPushButton("更换封面")
+            cover_btn.clicked.connect(self.replace_cover)
 
-        editor_frame = ttk.Frame(editor, padding=12)
-        editor_frame.pack(fill="both", expand=True)
+            info_l.addWidget(QLabel("书名"), 0, 0)
+            info_l.addWidget(self.title_edit, 0, 1, 1, 4)
+            info_l.addWidget(QLabel("作者"), 1, 0)
+            info_l.addWidget(self.author_edit, 1, 1)
+            info_l.addWidget(QLabel("封面"), 1, 2)
+            info_l.addWidget(self.cover_label, 1, 3)
+            info_l.addWidget(cover_btn, 1, 4)
+            info_l.addWidget(self.cover_preview, 0, 5, 2, 1)
+            info_l.setColumnStretch(1, 1)
+            info_l.setColumnStretch(3, 1)
+            root.addWidget(info_card)
+            self._update_cover_preview()
 
-        ttk.Label(editor_frame, text="书名").grid(row=0, column=0, sticky="w")
-        title_var = tk.StringVar(value=payload.meta.title)
-        ttk.Entry(editor_frame, textvariable=title_var, width=72).grid(row=0, column=1, columnspan=3, sticky="we", pady=4)
+            body = QHBoxLayout()
+            body.setSpacing(10)
+            root.addLayout(body, 1)
 
-        ttk.Label(editor_frame, text="作者").grid(row=1, column=0, sticky="w")
-        author_var = tk.StringVar(value=payload.meta.author)
-        ttk.Entry(editor_frame, textvariable=author_var, width=30).grid(row=1, column=1, sticky="w", pady=4)
+            list_card = Card()
+            ll = QVBoxLayout(list_card)
+            ll.setContentsMargins(12, 12, 12, 12)
+            ll.addWidget(QLabel("章节列表（可拖拽排序）"))
+            self.chapter_list = QListWidget()
+            self.chapter_list.setAlternatingRowColors(False)
+            self.chapter_list.setDragDropMode(QAbstractItemView.InternalMove)
+            self.chapter_list.setDefaultDropAction(Qt.MoveAction)
+            self.chapter_list.currentRowChanged.connect(self.on_select)
+            ll.addWidget(self.chapter_list, 1)
+            body.addWidget(list_card, 1)
 
-        cover_var = tk.StringVar(value=payload.cover_name or "(当前无封面)")
-        ttk.Label(editor_frame, text="封面").grid(row=1, column=2, sticky="e")
-        ttk.Label(editor_frame, textvariable=cover_var).grid(row=1, column=3, sticky="w", padx=(6, 0))
+            tool_card = Card()
+            tl = QVBoxLayout(tool_card)
+            tl.setContentsMargins(12, 12, 12, 12)
+            tl.setSpacing(8)
+            tl.addWidget(QLabel("编辑工具"))
+            tl.addWidget(QLabel("单章标题"))
+            self.single_title = QLineEdit()
+            tl.addWidget(self.single_title)
+            btn_single = QPushButton("应用到当前章节")
+            btn_single.clicked.connect(self.apply_single)
+            tl.addWidget(btn_single)
 
-        list_frame = ttk.Frame(editor_frame)
-        list_frame.grid(row=2, column=0, columnspan=4, sticky="nsew", pady=(8, 6))
+            tl.addWidget(QLabel("批量正则替换"))
+            self.regex_edit = QLineEdit()
+            self.regex_edit.setPlaceholderText("正则表达式")
+            self.repl_edit = QLineEdit()
+            self.repl_edit.setPlaceholderText("替换文本（支持\\1）")
+            tl.addWidget(self.regex_edit)
+            tl.addWidget(self.repl_edit)
+            tip = QLabel("上框: 正则；下框: 替换文本（支持\\1）")
+            tip.setStyleSheet(f"color:{S.SUB};")
+            tl.addWidget(tip)
 
-        chapter_list = tk.Listbox(list_frame, height=20)
-        chapter_list.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=chapter_list.yview)
-        scrollbar.pack(side="right", fill="y")
-        chapter_list.configure(yscrollcommand=scrollbar.set)
+            self.scope_all = QRadioButton("作用于全部章节")
+            self.scope_sel = QRadioButton("仅作用于当前选中")
+            self.scope_all.setChecked(True)
+            grp = QButtonGroup(self)
+            grp.addButton(self.scope_all)
+            grp.addButton(self.scope_sel)
+            tl.addWidget(self.scope_all)
+            tl.addWidget(self.scope_sel)
 
-        for i, ch in enumerate(payload.chapters, start=1):
-            chapter_list.insert("end", f"{i:03d}. {ch.title}")
+            btn_batch = QPushButton("执行批量替换")
+            btn_batch.clicked.connect(self.apply_batch)
+            tl.addWidget(btn_batch)
+            tl.addStretch(1)
+            body.addWidget(tool_card)
+            tool_card.setFixedWidth(320)
 
-        edit_frame = ttk.Frame(editor_frame)
-        edit_frame.grid(row=3, column=0, columnspan=4, sticky="we")
-        ttk.Label(edit_frame, text="章节名").pack(side="left")
-        chapter_title_var = tk.StringVar()
-        chapter_entry = ttk.Entry(edit_frame, textvariable=chapter_title_var)
-        chapter_entry.pack(side="left", fill="x", expand=True, padx=8)
+            actions = QHBoxLayout()
+            actions.addStretch(1)
+            cancel = QPushButton("取消")
+            cancel.clicked.connect(self.reject)
+            stash = QPushButton("暂存")
+            stash.clicked.connect(self.stash_and_accept)
+            save = QPushButton("保存修改并导出")
+            save.clicked.connect(self.save_and_accept)
+            save.setObjectName("primary")
+            actions.addWidget(cancel)
+            actions.addWidget(stash)
+            actions.addWidget(save)
+            root.addLayout(actions)
 
-        def on_select(_event: object = None) -> None:
-            sel = chapter_list.curselection()
-            if not sel:
+            self.refresh_chapter_list()
+
+
+        def _update_cover_preview(self) -> None:
+            if not self.payload.cover_bytes:
+                self.cover_preview.setText("无封面")
+                self.cover_preview.setPixmap(QPixmap())
                 return
-            idx = sel[0]
-            chapter_title_var.set(payload.chapters[idx].title)
-
-        def apply_title() -> None:
-            sel = chapter_list.curselection()
-            if not sel:
+            pix = QPixmap()
+            if not pix.loadFromData(self.payload.cover_bytes):
+                self.cover_preview.setText("封面加载失败")
                 return
-            idx = sel[0]
-            new_title = normalize_chapter_title(chapter_title_var.get())
-            payload.chapters[idx].title = new_title
-            chapter_list.delete(idx)
-            chapter_list.insert(idx, f"{idx+1:03d}. {new_title}")
-            chapter_list.selection_set(idx)
-            chapter_list.activate(idx)
-
-        chapter_list.bind("<<ListboxSelect>>", on_select)
-        ttk.Button(edit_frame, text="应用章节名", command=apply_title).pack(side="left")
-
-        def replace_cover() -> None:
-            path = filedialog.askopenfilename(
-                title="选择封面图片",
-                filetypes=[("Image", "*.jpg *.jpeg *.png"), ("All files", "*.*")],
+            shown = pix.scaled(
+                self.cover_preview.width() - 8,
+                self.cover_preview.height() - 8,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
             )
+            self.cover_preview.setPixmap(shown)
+
+        def refresh_chapter_list(self, select: int = 0) -> None:
+            self.chapter_list.clear()
+            for i, ch in enumerate(self.payload.chapters, 1):
+                item = QListWidgetItem(f"{i:03d}. {ch.title}")
+                item.setData(Qt.UserRole, ch)
+                self.chapter_list.addItem(item)
+            if self.chapter_list.count() > 0:
+                self.chapter_list.setCurrentRow(max(0, min(select, self.chapter_list.count() - 1)))
+
+        def on_select(self, row: int) -> None:
+            if row >= 0:
+                ch = self.chapter_list.item(row).data(Qt.UserRole)
+                self.single_title.setText(ch.title)
+
+        def _sync_order_from_list(self) -> None:
+            self.payload.chapters = [self.chapter_list.item(i).data(Qt.UserRole) for i in range(self.chapter_list.count())]
+
+        def apply_single(self) -> None:
+            row = self.chapter_list.currentRow()
+            if row < 0:
+                QMessageBox.warning(self, "提示", "请先选择章节")
+                return
+            ch = self.chapter_list.item(row).data(Qt.UserRole)
+            ch.title = normalize_chapter_title(self.single_title.text())
+            self._sync_order_from_list()
+            self.refresh_chapter_list(row)
+
+        def apply_batch(self) -> None:
+            pattern = self.regex_edit.text().strip()
+            repl = self.repl_edit.text()
+            if not pattern:
+                QMessageBox.critical(self, "参数错误", "请填写正则表达式")
+                return
+            try:
+                rgx = re.compile(pattern)
+            except re.error as exc:
+                QMessageBox.critical(self, "正则错误", str(exc))
+                return
+
+            self._sync_order_from_list()
+            if self.scope_sel.isChecked():
+                row = self.chapter_list.currentRow()
+                if row < 0:
+                    QMessageBox.warning(self, "提示", "请先选择章节")
+                    return
+                targets = [row]
+            else:
+                targets = list(range(len(self.payload.chapters)))
+
+            changed = 0
+            for idx in targets:
+                old = self.payload.chapters[idx].title
+                new = normalize_chapter_title(rgx.sub(repl, old))
+                if old != new:
+                    self.payload.chapters[idx].title = new
+                    changed += 1
+            self.refresh_chapter_list(targets[0] if targets else 0)
+            QMessageBox.information(self, "完成", f"已更新 {changed} 个章节标题")
+
+        def replace_cover(self) -> None:
+            path, _ = QFileDialog.getOpenFileName(self, "选择封面图片", "", "Image Files (*.jpg *.jpeg *.png)")
             if not path:
                 return
             try:
                 raw = Path(path).read_bytes()
             except Exception as exc:
-                messagebox.showerror("错误", f"读取封面失败: {exc}", parent=editor)
+                QMessageBox.critical(self, "错误", f"读取封面失败: {exc}")
                 return
             suffix = Path(path).suffix.lower()
             if suffix == ".png":
-                payload.cover_type = "image/png"
-                payload.cover_name = "cover.png"
+                self.payload.cover_type = "image/png"
+                self.payload.cover_name = "cover.png"
             else:
-                payload.cover_type = "image/jpeg"
-                payload.cover_name = "cover.jpg"
-            payload.cover_bytes = raw
-            cover_var.set(Path(path).name)
+                self.payload.cover_type = "image/jpeg"
+                self.payload.cover_name = "cover.jpg"
+            self.payload.cover_bytes = raw
+            self.cover_label.setText(Path(path).name)
+            self._update_cover_preview()
 
-        action_frame = ttk.Frame(editor_frame)
-        action_frame.grid(row=4, column=0, columnspan=4, sticky="we", pady=(8, 0))
-        saved = {"ok": False}
+        def stash_and_accept(self) -> None:
+            self._sync_order_from_list()
+            self.payload.meta.title = self.title_edit.text().strip() or self.payload.meta.title
+            self.payload.meta.author = self.author_edit.text().strip() or self.payload.meta.author
 
-        def save_and_close() -> None:
-            payload.meta.title = title_var.get().strip() or payload.meta.title
-            payload.meta.author = author_var.get().strip() or payload.meta.author
-            if not payload.chapters:
-                messagebox.showerror("错误", "没有可保存的章节。", parent=editor)
+            default_stash = DEFAULT_STASH_DIR / f"{safe_filename(self.payload.meta.title, suffix='')}.novelstash.json"
+            stash_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存暂存文件",
+                str(default_stash),
+                "Novel Stash (*.novelstash.json);;JSON Files (*.json)",
+            )
+            if not stash_path:
                 return
-            saved["ok"] = True
-            editor.destroy()
+            save_payload_stash(Path(stash_path), self.payload)
+            self.stash_requested = True
+            self.last_stash_path = Path(stash_path)
+            self.accept()
 
-        ttk.Button(action_frame, text="更换封面", command=replace_cover).pack(side="left")
-        ttk.Button(action_frame, text="保存修改并导出", style="Accent.TButton", command=save_and_close).pack(side="right")
-        ttk.Button(action_frame, text="取消", command=editor.destroy).pack(side="right", padx=(0, 8))
+        def save_and_accept(self) -> None:
+            self._sync_order_from_list()
+            self.payload.meta.title = self.title_edit.text().strip() or self.payload.meta.title
+            self.payload.meta.author = self.author_edit.text().strip() or self.payload.meta.author
+            if self.output_path.endswith("novel.epub"):
+                self.output_edit.setText(str(Path(self.output_path).with_name(safe_filename(self.payload.meta.title))))
+            self.accept()
 
-        editor_frame.columnconfigure(1, weight=1)
-        editor_frame.columnconfigure(3, weight=1)
-        editor_frame.rowconfigure(2, weight=1)
+    class MainWindow(QMainWindow):
+        def __init__(self) -> None:
+            super().__init__()
+            self.worker: DownloadWorker | None = None
+            self._build_ui()
 
-        editor.wait_window()
-        return saved["ok"]
-
-    def start_download() -> None:
-        if downloading["active"]:
-            messagebox.showinfo("提示", "下载正在进行中，请稍候。")
-            return
-
-        input_url = url_var.get().strip()
-        output_path = output_var.get().strip()
-        if not input_url or not output_path:
-            messagebox.showerror("参数错误", "请填写小说链接与输出文件路径。")
-            return
-
-        try:
-            start = int(start_var.get().strip())
-            end = int(end_var.get().strip())
-            delay = float(delay_var.get().strip())
-        except ValueError:
-            messagebox.showerror("参数错误", "起始/结束章节必须是整数，间隔必须是数字。")
-            return
-
-        set_running(True)
-        log_box.delete("1.0", "end")
-        log("开始下载 EPUB 数据...")
-        log("提示：下载完成后会进入“编辑章节/封面”界面。")
-
-        def worker() -> None:
-            payload = download_novel_payload(
-                input_url,
-                start,
-                end,
-                delay,
-                logger=log,
-                to_simplified=bool(simplified_var.get()),
+        def _build_ui(self) -> None:
+            _ensure_output_dirs()
+            self.setWindowTitle("AliceScreep 小说下载器")
+            self.resize(1100, 840)
+            self.setMinimumSize(980, 760)
+            self.setStyleSheet(
+                f"""
+                QMainWindow, QWidget {{
+                    background:{S.BG};
+                    color:{S.TEXT};
+                    font-family:'Segoe UI','Microsoft YaHei','PingFang SC';
+                    font-size:10pt;
+                }}
+                QLabel {{
+                    background: transparent;
+                    color:{S.TEXT};
+                }}
+                QFrame#card {{
+                    background:{S.CARD};
+                    border:1px solid #d8e2f0;
+                    border-radius:16px;
+                }}
+                QLineEdit {{
+                    background:#ffffff;
+                    border:1px solid #d7e0ee;
+                    border-radius:10px;
+                    padding:9px 10px;
+                    selection-background-color:#cfe1ff;
+                }}
+                QLineEdit:focus {{
+                    border:1px solid #76a2ff;
+                    background:#fdfefe;
+                }}
+                QPushButton {{
+                    background:#f8fafc;
+                    border:1px solid #d9e1ec;
+                    border-radius:10px;
+                    padding:8px 12px;
+                    font-weight:500;
+                }}
+                QPushButton:hover {{
+                    background:#eef3fb;
+                    border-color:#c4d6f4;
+                }}
+                QPushButton:pressed {{
+                    background:#e2ebfa;
+                }}
+                QPushButton#primary {{
+                    background:{S.PRIMARY};
+                    color:white;
+                    border:none;
+                    font-weight:600;
+                    padding:9px 14px;
+                }}
+                QPushButton#primary:hover {{
+                    background:{S.PRIMARY_H};
+                }}
+                QPushButton#primary:pressed {{
+                    background:#275ed0;
+                }}
+                QTextEdit#log, QListWidget {{
+                    border:1px solid #1f2d49;
+                    border-radius:10px;
+                }}
+                QTextEdit#log {{
+                    background:{S.LOG_BG};
+                    color:{S.LOG_TXT};
+                    padding:12px;
+                    font-family:'Cascadia Code','Consolas';
+                }}
+                QListWidget {{
+                    background:#f8fbff;
+                    border:1px solid #d9e3f3;
+                    color:{S.TEXT};
+                    padding:6px;
+                }}
+                QListWidget::item {{
+                    border-radius:8px;
+                    padding:7px 8px;
+                    margin:2px 0;
+                }}
+                QListWidget::item:selected {{
+                    background:#dce9ff;
+                    color:#0e2244;
+                }}
+                QScrollBar:vertical {{
+                    background:transparent;
+                    width:10px;
+                    margin:4px 0 4px 0;
+                }}
+                QScrollBar::handle:vertical {{
+                    background:#b4c4df;
+                    min-height:24px;
+                    border-radius:5px;
+                }}
+                QScrollBar::handle:vertical:hover {{
+                    background:#98add0;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height:0;
+                }}
+                QScrollBar:horizontal {{
+                    background:transparent;
+                    height:10px;
+                    margin:0 4px 0 4px;
+                }}
+                QScrollBar::handle:horizontal {{
+                    background:#b4c4df;
+                    min-width:24px;
+                    border-radius:5px;
+                }}
+                QScrollBar::handle:horizontal:hover {{
+                    background:#98add0;
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                    width:0;
+                }}
+                QProgressBar {{
+                    border:1px solid #d9e2f1;
+                    border-radius:7px;
+                    background:#ecf1f8;
+                    text-align:center;
+                    height:14px;
+                }}
+                QProgressBar::chunk {{
+                    border-radius:6px;
+                    background:{S.PRIMARY};
+                }}
+                """
             )
 
-            def done() -> None:
-                set_running(False)
-                if payload is None:
-                    messagebox.showerror("失败", "下载失败，请检查日志。")
-                    return
+            root = QWidget()
+            self.setCentralWidget(root)
+            outer = QVBoxLayout(root)
+            outer.setContentsMargins(18, 18, 18, 18)
+            outer.setSpacing(10)
 
-                ok = open_editor(payload, output_path)
-                if not ok:
-                    log("❌ 已取消保存。")
-                    return
-                save_payload_to_epub(payload, Path(output_path), logger=log)
-                messagebox.showinfo("完成", "下载完成，已编辑并生成 EPUB。")
+            title = QLabel("小说下载与编辑工作台")
+            title.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
+            subtitle = QLabel("PyQt5 扁平化圆角卡片风格 · 支持拖拽排序 / 正则批量改名 / 封面替换")
+            subtitle.setStyleSheet(f"color:{S.SUB};")
+            outer.addWidget(title)
+            outer.addWidget(subtitle)
 
-            root.after(0, done)
+            card = Card()
+            g = QGridLayout(card)
+            g.setContentsMargins(14, 14, 14, 14)
+            g.setHorizontalSpacing(8)
+            g.setVerticalSpacing(8)
+            self.url_edit = QLineEdit()
+            self.output_edit = QLineEdit(str(DEFAULT_OUTPUT_FILE))
+            self.start_edit = QLineEdit("1")
+            self.end_edit = QLineEdit("0")
+            self.delay_edit = QLineEdit("0.2")
 
-        Thread(target=worker, daemon=True).start()
+            browse = QPushButton("浏览")
+            browse.clicked.connect(self.browse_output)
 
-    ttk.Button(footer, text="开始下载并编辑", style="Accent.TButton", command=start_download).pack(side="left")
-    ttk.Button(footer, text="退出", command=root.destroy).pack(side="right")
+            self.simplified = QRadioButton("保存前繁体转简体")
+            self.simplified.setChecked(True)
 
-    root.mainloop()
-    return 0
+            g.addWidget(QLabel("小说链接"), 0, 0)
+            g.addWidget(self.url_edit, 0, 1, 1, 5)
+            g.addWidget(QLabel("输出文件"), 1, 0)
+            g.addWidget(self.output_edit, 1, 1, 1, 4)
+            g.addWidget(browse, 1, 5)
+            g.addWidget(QLabel("起始章节"), 2, 0)
+            g.addWidget(self.start_edit, 2, 1)
+            g.addWidget(QLabel("结束章节"), 2, 2)
+            g.addWidget(self.end_edit, 2, 3)
+            g.addWidget(QLabel("下载间隔(秒)"), 2, 4)
+            g.addWidget(self.delay_edit, 2, 5)
+            g.addWidget(self.simplified, 3, 1, 1, 3)
+            g.setColumnStretch(1, 1)
+            outer.addWidget(card)
+
+            mid = QHBoxLayout()
+            mid.setSpacing(10)
+            outer.addLayout(mid, 1)
+
+            log_card = Card()
+            lv = QVBoxLayout(log_card)
+            lv.setContentsMargins(12, 12, 12, 12)
+            lv.addWidget(QLabel("下载日志"))
+            self.log = QTextEdit()
+            self.log.setObjectName("log")
+            self.log.setReadOnly(True)
+            lv.addWidget(self.log, 1)
+            mid.addWidget(log_card, 1)
+
+            tip_card = Card()
+            tv = QVBoxLayout(tip_card)
+            tv.setContentsMargins(12, 12, 12, 12)
+
+            tips_title = QLabel("操作提示")
+            tips_title.setStyleSheet("font-weight:600;")
+            tv.addWidget(tips_title)
+            for msg in [
+                "• 填写链接后点击“开始下载并编辑”",
+                "• 下载结束后会进入编辑窗口",
+                "• 编辑窗口支持封面替换与章节拖拽",
+                "• 支持正则批量改章节名",
+            ]:
+                lbl = QLabel(msg)
+                lbl.setWordWrap(True)
+                tv.addWidget(lbl)
+
+            site_title = QLabel("支持网站")
+            site_title.setStyleSheet("font-weight:600; margin-top:8px;")
+            tv.addWidget(site_title)
+            for site_name, sample in [
+                ("AliceSW", "https://www.alicesw.tw/novel/2735.html"),
+                ("SilverNoelle", "https://silvernoelle.com/category/.../"),
+            ]:
+                row = QLabel(f"• {site_name}\n  {sample}")
+                row.setWordWrap(True)
+                row.setStyleSheet(f"color:{S.SUB};")
+                tv.addWidget(row)
+
+            tv.addStretch(1)
+            tip_card.setFixedWidth(320)
+            mid.addWidget(tip_card)
+
+            self.progress = QProgressBar()
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress.setFormat("0%")
+            self.progress.hide()
+            outer.addWidget(self.progress)
+
+            bottom = QHBoxLayout()
+            self.status = QLabel("就绪")
+            self.status.setStyleSheet(f"color:{S.SUB};")
+            bottom.addWidget(self.status)
+            bottom.addStretch(1)
+
+            quit_btn = QPushButton("退出")
+            quit_btn.clicked.connect(self.close)
+            load_stash_btn = QPushButton("读取暂存并编辑")
+            load_stash_btn.clicked.connect(self.load_stash_and_edit)
+            start_btn = QPushButton("开始下载并编辑")
+            start_btn.setObjectName("primary")
+            start_btn.clicked.connect(self.start_download)
+            self.start_btn = start_btn
+            bottom.addWidget(quit_btn)
+            bottom.addWidget(load_stash_btn)
+            bottom.addWidget(start_btn)
+            outer.addLayout(bottom)
+
+        def browse_output(self) -> None:
+            path, _ = QFileDialog.getSaveFileName(self, "保存 EPUB", str(DEFAULT_OUTPUT_FILE), "EPUB Files (*.epub)")
+            if path:
+                self.output_edit.setText(path)
+
+        def append_log(self, msg: str) -> None:
+            self.log.append(msg)
+
+        def set_running(self, running: bool) -> None:
+            self.start_btn.setDisabled(running)
+            self.progress.setVisible(running)
+            if running:
+                self.progress.setValue(0)
+                self.progress.setFormat("0%")
+            self.status.setText("下载中..." if running else "就绪")
+
+        def update_progress(self, current: int, total: int) -> None:
+            if total <= 0:
+                return
+            percent = int(current * 100 / total)
+            self.progress.setValue(percent)
+            self.progress.setFormat(f"{percent}% ({current}/{total})")
+            self.status.setText(f"下载中... {current}/{total}")
+
+        def start_download(self) -> None:
+            input_url = self.url_edit.text().strip()
+            output_path = self.output_edit.text().strip()
+            if not input_url or not output_path:
+                QMessageBox.critical(self, "参数错误", "请填写小说链接与输出文件路径。")
+                return
+            try:
+                start = int(self.start_edit.text().strip())
+                end = int(self.end_edit.text().strip())
+                delay = float(self.delay_edit.text().strip())
+            except ValueError:
+                QMessageBox.critical(self, "参数错误", "起始/结束章节必须是整数，间隔必须是数字。")
+                return
+
+            self.log.clear()
+            self.append_log("✨ 开始下载 EPUB 数据...（完成后自动打开编辑器）")
+            self.set_running(True)
+
+            self.worker = DownloadWorker(input_url, start, end, delay, self.simplified.isChecked())
+            self.worker.log.connect(self.append_log)
+            self.worker.failed.connect(self.on_failed)
+            self.worker.progress.connect(self.update_progress)
+            self.worker.done.connect(lambda payload: self.on_done(payload, output_path))
+            self.worker.start()
+
+        def open_editor_and_handle(self, payload: DownloadPayload, output_path: str) -> None:
+            dlg = ChapterEditor(payload, self.output_edit.text(), self.output_edit, self)
+            if not dlg.exec_():
+                self.append_log("❌ 已取消保存")
+                return
+            if dlg.stash_requested:
+                stash_msg = f"💾 已暂存: {dlg.last_stash_path}" if dlg.last_stash_path else "💾 已暂存"
+                self.append_log(stash_msg)
+                self.status.setText("已暂存")
+                QMessageBox.information(self, "暂存完成", stash_msg)
+                return
+            save_payload_to_epub(payload, Path(self.output_edit.text()), logger=self.append_log)
+            self.status.setText("导出完成")
+            QMessageBox.information(self, "完成", "下载完成，已编辑并生成 EPUB。")
+
+        def load_stash_and_edit(self) -> None:
+            _ensure_output_dirs()
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "读取暂存文件",
+                str(DEFAULT_STASH_DIR),
+                "Novel Stash (*.novelstash.json);;JSON Files (*.json)",
+            )
+            if not path:
+                return
+            try:
+                payload = load_payload_stash(Path(path))
+            except Exception as exc:
+                QMessageBox.critical(self, "读取失败", f"读取暂存失败: {exc}")
+                return
+            if self.output_edit.text().strip().endswith("novel.epub"):
+                self.output_edit.setText(str(DEFAULT_OUTPUT_DIR / safe_filename(payload.meta.title)))
+            self.open_editor_and_handle(payload, self.output_edit.text().strip())
+
+        def on_failed(self, err: str) -> None:
+            self.set_running(False)
+            self.append_log(f"❌ 下载异常: {err}")
+            QMessageBox.critical(self, "失败", "下载失败，请检查日志。")
+
+        def on_done(self, payload: DownloadPayload | None, output_path: str) -> None:
+            self.set_running(False)
+            if payload is None:
+                QMessageBox.critical(self, "失败", "下载失败，请检查日志。")
+                return
+            if output_path.endswith("novel.epub"):
+                self.output_edit.setText(str(Path(output_path).with_name(safe_filename(payload.meta.title))))
+
+            self.open_editor_and_handle(payload, output_path)
+
+    _configure_qt_runtime()
+
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    app = QApplication([])
+    app.setFont(QFont("Segoe UI", 10))
+    w = MainWindow()
+    w.show()
+    return app.exec_()
 
 
 def main() -> int:
