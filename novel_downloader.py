@@ -162,11 +162,14 @@ def resolve_site_auth_for_url(input_url: str, site_configs: dict) -> dict | None
     cfg = site_configs.get(site_name, {})
     if not isinstance(cfg, dict):
         return None
-    return {
+    result = {
         "use_login": bool(cfg.get("use_login", False)),
         "username": str(cfg.get("username", "")),
         "password": str(cfg.get("password", "")),
     }
+    if source == "esj":
+        result["prefer_selenium"] = True
+    return result
 
 def launch_gui() -> int:
     try:

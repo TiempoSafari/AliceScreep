@@ -10,6 +10,7 @@ from .epub import build_epub
 from .http import HttpClient, fetch_html_with_retry, login_esjzone
 from .models import Chapter, ChapterContent, DownloadPayload
 from .sites import detect_source, extract_cover_url, fetch_cover_bytes, get_site_adapter
+from .selenium_client import SeleniumClient
 from .text import extract_title, normalize_chapter_title, safe_filename, sanitize_url
 
 
@@ -21,6 +22,7 @@ def _download_chapters(
     to_simplified: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
     http_client: HttpClient | None = None,
+    selenium_client: SeleniumClient | None = None,
 ) -> list[ChapterContent]:
     chapter_list = list(chapters)
     total = len(chapter_list)
@@ -34,7 +36,7 @@ def _download_chapters(
             continue
         logger(f"[{idx}] 下载中: {chapter.title} -> {chapter_url}")
         try:
-            chapter_html = (http_client.fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0))
+            chapter_html = (selenium_client.fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.2) if selenium_client else (http_client.fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0)))
         except (URLError, ValueError, OSError) as exc:
             logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
             if progress_callback:
@@ -76,16 +78,28 @@ def download_novel_payload(
     adapter = get_site_adapter(input_url)
 
     http_client: HttpClient | None = None
+    selenium_client: SeleniumClient | None = None
     auth = site_auth or {}
     source = detect_source(input_url)
     if source == "esj" and auth.get("use_login"):
         username = str(auth.get("username", "")).strip()
         password = str(auth.get("password", ""))
+        prefer_selenium = bool(auth.get("prefer_selenium", True))
         if username and password:
-            try:
-                http_client = login_esjzone(username, password, logger=logger)
-            except Exception as exc:
-                logger(f"❌ [警告] ESJ 登录失败，将以未登录状态继续: {exc}")
+            if prefer_selenium:
+                try:
+                    selenium_client = SeleniumClient(headless=True)
+                    selenium_client.login_esjzone(username, password, logger=logger)
+                except Exception as exc:
+                    logger(f"❌ [警告] ESJ Selenium 登录失败，将回退 HTTP 登录: {exc}")
+                    if selenium_client:
+                        selenium_client.close()
+                        selenium_client = None
+            if selenium_client is None:
+                try:
+                    http_client = login_esjzone(username, password, logger=logger)
+                except Exception as exc:
+                    logger(f"❌ [警告] ESJ HTTP 登录失败，将以未登录状态继续: {exc}")
         else:
             logger("❌ [警告] ESJ 已启用登录，但用户名或密码为空，将以未登录状态继续。")
 
@@ -97,9 +111,11 @@ def download_novel_payload(
         chapter_index_url = input_url
 
     try:
-        index_html = (http_client.fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0))
+        index_html = (selenium_client.fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.2) if selenium_client else (http_client.fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0)))
     except URLError as exc:
         logger(f"❌ 目录页请求失败: {exc}")
+        if selenium_client:
+            selenium_client.close()
         return None
 
     meta = adapter.extract_meta(index_html)
@@ -114,6 +130,8 @@ def download_novel_payload(
     chapters = adapter.discover_chapters(chapter_index_url, index_html, logger=logger)
     if not chapters:
         logger("❌ 未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
+        if selenium_client:
+            selenium_client.close()
         return None
 
     safe_start = max(start, 1)
@@ -121,6 +139,8 @@ def download_novel_payload(
     selected = chapters[safe_start - 1 : safe_end]
     if not selected:
         logger("❌ 筛选后没有章节，请检查起始章节/结束章节。")
+        if selenium_client:
+            selenium_client.close()
         return None
 
     logger(f"准备下载：总章节 {len(chapters)}，本次下载 {len(selected)}（范围 {safe_start}-{safe_end}）")
@@ -132,16 +152,19 @@ def download_novel_payload(
         to_simplified=to_simplified,
         progress_callback=progress_callback,
         http_client=http_client,
+        selenium_client=selenium_client,
     )
     if not downloaded:
         logger("❌ 没有成功下载任何章节，未生成 EPUB。")
+        if selenium_client:
+            selenium_client.close()
         return None
 
     cover_bytes = cover_type = cover_name = None
     novel_url = adapter.build_novel_url(input_url)
     if novel_url:
         try:
-            novel_html = (http_client.fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0) if http_client else fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0))
+            novel_html = (selenium_client.fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.2) if selenium_client else (http_client.fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0) if http_client else fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0)))
             cover_url = extract_cover_url(novel_html, base_url=novel_url)
             if cover_url:
                 cover_bytes, cover_type, cover_name = fetch_cover_bytes(cover_url)
@@ -155,7 +178,10 @@ def download_novel_payload(
         meta.title = maybe_convert_to_simplified(meta.title, True)
         meta.author = maybe_convert_to_simplified(meta.author, True)
 
-    return DownloadPayload(meta=meta, chapters=downloaded, cover_bytes=cover_bytes, cover_type=cover_type, cover_name=cover_name)
+    payload = DownloadPayload(meta=meta, chapters=downloaded, cover_bytes=cover_bytes, cover_type=cover_type, cover_name=cover_name)
+    if selenium_client:
+        selenium_client.close()
+    return payload
 
 
 def _resolve_output_file(payload: DownloadPayload, output_file: Path) -> Path:
