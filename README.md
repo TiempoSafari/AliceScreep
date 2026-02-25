@@ -25,6 +25,8 @@ python novel_downloader.py
 - AliceSW 章节目录页：`https://www.alicesw.tw/other/chapters/id/2735.html`
 - SilverNoelle 分类目录页：`https://silvernoelle.com/category/.../`
 
+GUI 右侧“操作提示”卡片中也会显示“支持网站”列表，方便直接复制示例链接。
+
 对 AliceSW，程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面；对 SilverNoelle，会自动跟随“较旧文章 / Older Posts”分页抓取完整章节列表，并按发布时间从旧到新下载。
 
 默认流程为：**下载数据 → 打开编辑界面 → 修改章节名/封面 → 再保存 EPUB**。

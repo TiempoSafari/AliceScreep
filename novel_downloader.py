@@ -552,7 +552,10 @@ def launch_gui() -> int:
             tip_card = Card()
             tv = QVBoxLayout(tip_card)
             tv.setContentsMargins(12, 12, 12, 12)
-            tv.addWidget(QLabel("操作提示"))
+
+            tips_title = QLabel("操作提示")
+            tips_title.setStyleSheet("font-weight:600;")
+            tv.addWidget(tips_title)
             for msg in [
                 "• 填写链接后点击“开始下载并编辑”",
                 "• 下载结束后会进入编辑窗口",
@@ -562,8 +565,21 @@ def launch_gui() -> int:
                 lbl = QLabel(msg)
                 lbl.setWordWrap(True)
                 tv.addWidget(lbl)
+
+            site_title = QLabel("支持网站")
+            site_title.setStyleSheet("font-weight:600; margin-top:8px;")
+            tv.addWidget(site_title)
+            for site_name, sample in [
+                ("AliceSW", "https://www.alicesw.tw/novel/2735.html"),
+                ("SilverNoelle", "https://silvernoelle.com/category/.../"),
+            ]:
+                row = QLabel(f"• {site_name}\n  {sample}")
+                row.setWordWrap(True)
+                row.setStyleSheet(f"color:{S.SUB};")
+                tv.addWidget(row)
+
             tv.addStretch(1)
-            tip_card.setFixedWidth(300)
+            tip_card.setFixedWidth(320)
             mid.addWidget(tip_card)
 
             self.progress = QProgressBar()
