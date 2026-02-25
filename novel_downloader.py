@@ -4,24 +4,87 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import os
 import re
 from pathlib import Path
 
 from downloader import DownloadPayload, download_novel_payload, normalize_chapter_title, run_download, save_payload_to_epub
+from downloader.models import ChapterContent, NovelMeta
 from downloader.text import safe_filename
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="下载 AliceSW/SilverNoelle 小说并导出成 EPUB")
     parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html 或 https://silvernoelle.com/category/.../")
-    parser.add_argument("-o", "--output", default="novel.epub", help="输出 EPUB 文件路径（默认自动使用书名命名）")
+    parser.add_argument("-o", "--output", default=str(DEFAULT_OUTPUT_FILE), help="输出 EPUB 文件路径（默认 output/novel.epub，自动可按书名命名）")
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")
     parser.add_argument("--end", type=int, default=0, help="结束章节（0 表示到最后）")
     parser.add_argument("--no-simplified", action="store_true", help="关闭繁体转简体（默认开启）")
     parser.add_argument("--gui", action="store_true", help="启动图形界面")
     return parser.parse_args()
+
+
+DEFAULT_OUTPUT_DIR = Path.cwd() / "output"
+DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "novel.epub"
+DEFAULT_STASH_DIR = DEFAULT_OUTPUT_DIR / "stash"
+
+
+def _ensure_output_dirs() -> None:
+    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_STASH_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_payload_stash(path: Path, payload: DownloadPayload) -> None:
+    data = {
+        "version": 1,
+        "meta": {
+            "title": payload.meta.title,
+            "author": payload.meta.author,
+            "language": payload.meta.language,
+        },
+        "chapters": [
+            {"title": c.title, "content": c.content, "source_url": c.source_url}
+            for c in payload.chapters
+        ],
+        "cover": {
+            "bytes_b64": base64.b64encode(payload.cover_bytes).decode("ascii") if payload.cover_bytes else None,
+            "type": payload.cover_type,
+            "name": payload.cover_name,
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_payload_stash(path: Path) -> DownloadPayload:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    meta_data = data.get("meta", {})
+    meta = NovelMeta(
+        title=meta_data.get("title", "未命名小说"),
+        author=meta_data.get("author", "未知作者"),
+        language=meta_data.get("language", "zh-Hant"),
+    )
+    chapters = [
+        ChapterContent(
+            title=item.get("title", "未知章节"),
+            content=item.get("content", ""),
+            source_url=item.get("source_url", ""),
+        )
+        for item in data.get("chapters", [])
+    ]
+    cover_data = data.get("cover", {})
+    cover_b64 = cover_data.get("bytes_b64")
+    cover_bytes = base64.b64decode(cover_b64) if cover_b64 else None
+    return DownloadPayload(
+        meta=meta,
+        chapters=chapters,
+        cover_bytes=cover_bytes,
+        cover_type=cover_data.get("type"),
+        cover_name=cover_data.get("name"),
+    )
 
 
 def launch_gui() -> int:
@@ -147,6 +210,8 @@ def launch_gui() -> int:
             self.payload = payload
             self.output_path = output_path
             self.output_edit = output_edit
+            self.stash_requested = False
+            self.last_stash_path: Path | None = None
             self.setWindowTitle("编辑章节与封面")
             self.resize(1060, 760)
 
@@ -240,10 +305,13 @@ def launch_gui() -> int:
             actions.addStretch(1)
             cancel = QPushButton("取消")
             cancel.clicked.connect(self.reject)
+            stash = QPushButton("暂存")
+            stash.clicked.connect(self.stash_and_accept)
             save = QPushButton("保存修改并导出")
             save.clicked.connect(self.save_and_accept)
             save.setObjectName("primary")
             actions.addWidget(cancel)
+            actions.addWidget(stash)
             actions.addWidget(save)
             root.addLayout(actions)
 
@@ -346,6 +414,25 @@ def launch_gui() -> int:
             self.cover_label.setText(Path(path).name)
             self._update_cover_preview()
 
+        def stash_and_accept(self) -> None:
+            self._sync_order_from_list()
+            self.payload.meta.title = self.title_edit.text().strip() or self.payload.meta.title
+            self.payload.meta.author = self.author_edit.text().strip() or self.payload.meta.author
+
+            default_stash = DEFAULT_STASH_DIR / f"{safe_filename(self.payload.meta.title, suffix='')}.novelstash.json"
+            stash_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存暂存文件",
+                str(default_stash),
+                "Novel Stash (*.novelstash.json);;JSON Files (*.json)",
+            )
+            if not stash_path:
+                return
+            save_payload_stash(Path(stash_path), self.payload)
+            self.stash_requested = True
+            self.last_stash_path = Path(stash_path)
+            self.accept()
+
         def save_and_accept(self) -> None:
             self._sync_order_from_list()
             self.payload.meta.title = self.title_edit.text().strip() or self.payload.meta.title
@@ -361,6 +448,7 @@ def launch_gui() -> int:
             self._build_ui()
 
         def _build_ui(self) -> None:
+            _ensure_output_dirs()
             self.setWindowTitle("AliceScreep 小说下载器")
             self.resize(1100, 840)
             self.setMinimumSize(980, 760)
@@ -509,7 +597,7 @@ def launch_gui() -> int:
             g.setHorizontalSpacing(8)
             g.setVerticalSpacing(8)
             self.url_edit = QLineEdit()
-            self.output_edit = QLineEdit(str(Path.cwd() / "novel.epub"))
+            self.output_edit = QLineEdit(str(DEFAULT_OUTPUT_FILE))
             self.start_edit = QLineEdit("1")
             self.end_edit = QLineEdit("0")
             self.delay_edit = QLineEdit("0.2")
@@ -597,16 +685,19 @@ def launch_gui() -> int:
 
             quit_btn = QPushButton("退出")
             quit_btn.clicked.connect(self.close)
+            load_stash_btn = QPushButton("读取暂存并编辑")
+            load_stash_btn.clicked.connect(self.load_stash_and_edit)
             start_btn = QPushButton("开始下载并编辑")
             start_btn.setObjectName("primary")
             start_btn.clicked.connect(self.start_download)
             self.start_btn = start_btn
             bottom.addWidget(quit_btn)
+            bottom.addWidget(load_stash_btn)
             bottom.addWidget(start_btn)
             outer.addLayout(bottom)
 
         def browse_output(self) -> None:
-            path, _ = QFileDialog.getSaveFileName(self, "保存 EPUB", str(Path.cwd() / "novel.epub"), "EPUB Files (*.epub)")
+            path, _ = QFileDialog.getSaveFileName(self, "保存 EPUB", str(DEFAULT_OUTPUT_FILE), "EPUB Files (*.epub)")
             if path:
                 self.output_edit.setText(path)
 
@@ -654,6 +745,40 @@ def launch_gui() -> int:
             self.worker.done.connect(lambda payload: self.on_done(payload, output_path))
             self.worker.start()
 
+        def open_editor_and_handle(self, payload: DownloadPayload, output_path: str) -> None:
+            dlg = ChapterEditor(payload, self.output_edit.text(), self.output_edit, self)
+            if not dlg.exec_():
+                self.append_log("❌ 已取消保存")
+                return
+            if dlg.stash_requested:
+                stash_msg = f"💾 已暂存: {dlg.last_stash_path}" if dlg.last_stash_path else "💾 已暂存"
+                self.append_log(stash_msg)
+                self.status.setText("已暂存")
+                QMessageBox.information(self, "暂存完成", stash_msg)
+                return
+            save_payload_to_epub(payload, Path(self.output_edit.text()), logger=self.append_log)
+            self.status.setText("导出完成")
+            QMessageBox.information(self, "完成", "下载完成，已编辑并生成 EPUB。")
+
+        def load_stash_and_edit(self) -> None:
+            _ensure_output_dirs()
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "读取暂存文件",
+                str(DEFAULT_STASH_DIR),
+                "Novel Stash (*.novelstash.json);;JSON Files (*.json)",
+            )
+            if not path:
+                return
+            try:
+                payload = load_payload_stash(Path(path))
+            except Exception as exc:
+                QMessageBox.critical(self, "读取失败", f"读取暂存失败: {exc}")
+                return
+            if self.output_edit.text().strip().endswith("novel.epub"):
+                self.output_edit.setText(str(DEFAULT_OUTPUT_DIR / safe_filename(payload.meta.title)))
+            self.open_editor_and_handle(payload, self.output_edit.text().strip())
+
         def on_failed(self, err: str) -> None:
             self.set_running(False)
             self.append_log(f"❌ 下载异常: {err}")
@@ -667,13 +792,7 @@ def launch_gui() -> int:
             if output_path.endswith("novel.epub"):
                 self.output_edit.setText(str(Path(output_path).with_name(safe_filename(payload.meta.title))))
 
-            dlg = ChapterEditor(payload, self.output_edit.text(), self.output_edit, self)
-            if dlg.exec_():
-                save_payload_to_epub(payload, Path(self.output_edit.text()), logger=self.append_log)
-                self.status.setText("导出完成")
-                QMessageBox.information(self, "完成", "下载完成，已编辑并生成 EPUB。")
-            else:
-                self.append_log("❌ 已取消保存")
+            self.open_editor_and_handle(payload, output_path)
 
     _configure_qt_runtime()
 
