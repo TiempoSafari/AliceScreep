@@ -9,7 +9,7 @@ from .conversion import OPENCC, maybe_convert_to_simplified
 from .epub import build_epub
 from .http import fetch_html_with_retry
 from .models import Chapter, ChapterContent, DownloadPayload
-from .selenium_client import SeleniumClient, create_selenium_client_with_timeout
+from .selenium_client import SeleniumClient
 from .sites import detect_source, extract_cover_url, fetch_cover_bytes, get_site_adapter
 from .text import extract_title, normalize_chapter_title, safe_filename, sanitize_url
 
@@ -104,10 +104,11 @@ def download_novel_payload(
     source = detect_source(input_url)
 
     if source == "esj":
-        logger("⏳ ESJ: 正在初始化 Selenium（最多等待 20 秒）...")
-        selenium_client = create_selenium_client_with_timeout(logger=logger, timeout_seconds=20.0, headless=True)
-        if selenium_client is None:
-            logger("❌ ESJ Selenium 不可用，已中止（按当前策略 ESJ 仅允许 Selenium 抓取）。")
+        logger("⏳ ESJ: 正在初始化 Selenium（可见浏览器模式）...")
+        try:
+            selenium_client = SeleniumClient(headless=False)
+        except Exception as exc:
+            logger(f"❌ ESJ Selenium 启动失败，已中止: {exc}")
             return None
 
         if auth.get("use_login"):
@@ -125,7 +126,7 @@ def download_novel_payload(
                 selenium_client.close()
                 return None
         else:
-            logger("❌ [警告] ESJ 未启用登录，可能无法看到章节列表。")
+            logger("❌ [警告] ESJ 未启用登录，可能无法看到章节列表。建议在站点配置中开启登录。")
 
     chapter_index_url = adapter.build_chapter_index_url(input_url)
     if chapter_index_url:
