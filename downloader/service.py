@@ -9,9 +9,24 @@ from .conversion import OPENCC, maybe_convert_to_simplified
 from .epub import build_epub
 from .http import HttpClient, fetch_html_with_retry, login_esjzone
 from .models import Chapter, ChapterContent, DownloadPayload
+from .selenium_client import SeleniumClient, create_selenium_client_with_timeout
 from .sites import detect_source, extract_cover_url, fetch_cover_bytes, get_site_adapter
-from .selenium_client import SeleniumClient
 from .text import extract_title, normalize_chapter_title, safe_filename, sanitize_url
+
+
+def _fetch_html_with_clients(
+    url: str,
+    logger: Callable[[str], None],
+    selenium_client: SeleniumClient | None,
+    http_client: HttpClient | None,
+    retries: int = 2,
+    wait_seconds: float = 1.0,
+) -> str:
+    if selenium_client:
+        return selenium_client.fetch_html_with_retry(url, logger=logger, retries=retries, wait_seconds=max(wait_seconds, 1.2))
+    if http_client:
+        return http_client.fetch_html_with_retry(url, logger=logger, retries=retries, wait_seconds=wait_seconds)
+    return fetch_html_with_retry(url, logger=logger, retries=retries, wait_seconds=wait_seconds)
 
 
 def _download_chapters(
@@ -27,6 +42,7 @@ def _download_chapters(
     chapter_list = list(chapters)
     total = len(chapter_list)
     results: list[ChapterContent] = []
+
     for idx, chapter in enumerate(chapter_list, start=1):
         chapter_url = sanitize_url(chapter.url)
         if not chapter_url:
@@ -34,9 +50,17 @@ def _download_chapters(
             if progress_callback:
                 progress_callback(idx, total)
             continue
+
         logger(f"[{idx}] 下载中: {chapter.title} -> {chapter_url}")
         try:
-            chapter_html = (selenium_client.fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.2) if selenium_client else (http_client.fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_url, logger=logger, retries=2, wait_seconds=1.0)))
+            chapter_html = _fetch_html_with_clients(
+                chapter_url,
+                logger=logger,
+                selenium_client=selenium_client,
+                http_client=http_client,
+                retries=2,
+                wait_seconds=1.0,
+            )
         except (URLError, ValueError, OSError) as exc:
             logger(f"❌ [警告] 章节下载失败，已跳过: {chapter_url} | 错误: {exc}")
             if progress_callback:
@@ -47,6 +71,7 @@ def _download_chapters(
         title = normalize_chapter_title(chapter.title or page_title)
         if title == "未知章节":
             title = normalize_chapter_title(page_title)
+
         content = adapter.extract_content(chapter_html)
         if not content:
             logger(f"❌ [警告] 正文提取失败，已跳过: {chapter_url}")
@@ -58,9 +83,11 @@ def _download_chapters(
         content = maybe_convert_to_simplified(content, to_simplified)
         results.append(ChapterContent(title=title, content=content, source_url=chapter_url))
         logger(f"✅ 下载成功: {title}")
+
         time.sleep(delay)
         if progress_callback:
             progress_callback(idx, total)
+
     return results
 
 
@@ -81,22 +108,28 @@ def download_novel_payload(
     selenium_client: SeleniumClient | None = None
     auth = site_auth or {}
     source = detect_source(input_url)
+
     if source == "esj" and auth.get("use_login"):
         username = str(auth.get("username", "")).strip()
         password = str(auth.get("password", ""))
         prefer_selenium = bool(auth.get("prefer_selenium", True))
+
         if username and password:
             if prefer_selenium:
-                try:
-                    selenium_client = SeleniumClient(headless=True)
-                    selenium_client.login_esjzone(username, password, logger=logger)
-                except Exception as exc:
-                    logger(f"❌ [警告] ESJ Selenium 登录失败，将回退 HTTP 登录: {exc}")
-                    if selenium_client:
+                logger("⏳ ESJ: 正在初始化 Selenium（最多等待 20 秒）...")
+                selenium_client = create_selenium_client_with_timeout(logger=logger, timeout_seconds=20.0, headless=True)
+                if selenium_client:
+                    try:
+                        logger("⏳ ESJ: 正在使用 Selenium 登录...")
+                        selenium_client.login_esjzone(username, password, logger=logger)
+                    except Exception as exc:
+                        logger(f"❌ [警告] ESJ Selenium 登录失败，将回退 HTTP 登录: {exc}")
                         selenium_client.close()
                         selenium_client = None
+
             if selenium_client is None:
                 try:
+                    logger("⏳ ESJ: 正在使用 HTTP 会话登录...")
                     http_client = login_esjzone(username, password, logger=logger)
                 except Exception as exc:
                     logger(f"❌ [警告] ESJ HTTP 登录失败，将以未登录状态继续: {exc}")
@@ -111,7 +144,14 @@ def download_novel_payload(
         chapter_index_url = input_url
 
     try:
-        index_html = (selenium_client.fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.2) if selenium_client else (http_client.fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0) if http_client else fetch_html_with_retry(chapter_index_url, logger=logger, retries=2, wait_seconds=1.0)))
+        index_html = _fetch_html_with_clients(
+            chapter_index_url,
+            logger=logger,
+            selenium_client=selenium_client,
+            http_client=http_client,
+            retries=2,
+            wait_seconds=1.0,
+        )
     except URLError as exc:
         logger(f"❌ 目录页请求失败: {exc}")
         if selenium_client:
@@ -128,6 +168,29 @@ def download_novel_payload(
             logger("❌ [警告] 未安装 opencc，暂无法自动繁转简（可 `pip install opencc-python-reimplemented`）")
 
     chapters = adapter.discover_chapters(chapter_index_url, index_html, logger=logger)
+
+    # 若 ESJ HTTP 路径拿不到章节，且尚未启用 Selenium，则自动尝试 Selenium 补救一次。
+    if not chapters and source == "esj" and auth.get("use_login") and selenium_client is None:
+        username = str(auth.get("username", "")).strip()
+        password = str(auth.get("password", ""))
+        if username and password:
+            logger("⏳ ESJ: HTTP 未发现章节，尝试 Selenium 补救抓取...")
+            selenium_client = create_selenium_client_with_timeout(logger=logger, timeout_seconds=20.0, headless=True)
+            if selenium_client:
+                try:
+                    selenium_client.login_esjzone(username, password, logger=logger)
+                    index_html = _fetch_html_with_clients(
+                        chapter_index_url,
+                        logger=logger,
+                        selenium_client=selenium_client,
+                        http_client=http_client,
+                        retries=2,
+                        wait_seconds=1.0,
+                    )
+                    chapters = adapter.discover_chapters(chapter_index_url, index_html, logger=logger)
+                except Exception as exc:
+                    logger(f"❌ [警告] ESJ Selenium 补救抓取失败: {exc}")
+
     if not chapters:
         logger("❌ 未发现章节链接：请确认链接是否为小说详情页/章节目录页，或网站结构已变化。")
         if selenium_client:
@@ -164,7 +227,14 @@ def download_novel_payload(
     novel_url = adapter.build_novel_url(input_url)
     if novel_url:
         try:
-            novel_html = (selenium_client.fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.2) if selenium_client else (http_client.fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0) if http_client else fetch_html_with_retry(novel_url, logger=logger, retries=1, wait_seconds=1.0)))
+            novel_html = _fetch_html_with_clients(
+                novel_url,
+                logger=logger,
+                selenium_client=selenium_client,
+                http_client=http_client,
+                retries=1,
+                wait_seconds=1.0,
+            )
             cover_url = extract_cover_url(novel_html, base_url=novel_url)
             if cover_url:
                 cover_bytes, cover_type, cover_name = fetch_cover_bytes(cover_url)

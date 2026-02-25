@@ -99,3 +99,37 @@ class SeleniumClient:
                 logger("✅ ESJ Selenium 登录成功，已应用浏览器会话。")
             else:
                 logger("❌ [警告] ESJ Selenium 登录后未检测到明显登录态标记，后续抓取可能失败。")
+
+
+
+def create_selenium_client_with_timeout(
+    logger: Callable[[str], None] | None = None,
+    timeout_seconds: float = 20.0,
+    headless: bool = True,
+) -> SeleniumClient | None:
+    """在超时时间内创建 SeleniumClient，避免 driver 初始化长时间卡住主流程。"""
+    import threading
+
+    holder: dict[str, SeleniumClient | Exception] = {}
+
+    def _worker() -> None:
+        try:
+            holder["client"] = SeleniumClient(headless=headless)
+        except Exception as exc:
+            holder["error"] = exc
+
+    th = threading.Thread(target=_worker, daemon=True)
+    th.start()
+    th.join(timeout_seconds)
+
+    if th.is_alive():
+        if logger:
+            logger(f"❌ [警告] Selenium 启动超时（>{timeout_seconds:.0f}s），将回退 HTTP 抓取。")
+        return None
+
+    if "error" in holder:
+        if logger:
+            logger(f"❌ [警告] Selenium 启动失败，将回退 HTTP 抓取: {holder['error']}")
+        return None
+
+    return holder.get("client")  # type: ignore[return-value]
