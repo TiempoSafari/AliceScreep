@@ -87,6 +87,49 @@ def load_payload_stash(path: Path) -> DownloadPayload:
     )
 
 
+
+SITE_CONFIG_FILE = DEFAULT_OUTPUT_DIR / "site_configs.json"
+DEFAULT_SITE_CONFIGS = {
+    "AliceSW": {
+        "base_url": "https://www.alicesw.tw/novel/2735.html",
+        "username": "",
+        "password": "",
+        "use_login": False,
+    },
+    "SilverNoelle": {
+        "base_url": "https://silvernoelle.com/category/.../",
+        "username": "",
+        "password": "",
+        "use_login": False,
+    },
+}
+
+
+def load_site_configs() -> dict:
+    _ensure_output_dirs()
+    if not SITE_CONFIG_FILE.exists():
+        return json.loads(json.dumps(DEFAULT_SITE_CONFIGS))
+    try:
+        loaded = json.loads(SITE_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return json.loads(json.dumps(DEFAULT_SITE_CONFIGS))
+
+    merged = json.loads(json.dumps(DEFAULT_SITE_CONFIGS))
+    for name, cfg in loaded.items():
+        if name in merged and isinstance(cfg, dict):
+            merged[name].update({
+                "base_url": str(cfg.get("base_url", merged[name]["base_url"])),
+                "username": str(cfg.get("username", "")),
+                "password": str(cfg.get("password", "")),
+                "use_login": bool(cfg.get("use_login", False)),
+            })
+    return merged
+
+
+def save_site_configs(configs: dict) -> None:
+    _ensure_output_dirs()
+    SITE_CONFIG_FILE.write_text(json.dumps(configs, ensure_ascii=False, indent=2), encoding="utf-8")
+
 def launch_gui() -> int:
     try:
         import PyQt5
@@ -96,6 +139,7 @@ def launch_gui() -> int:
             QAbstractItemView,
             QApplication,
             QButtonGroup,
+            QCheckBox,
             QDialog,
             QFileDialog,
             QFrame,
@@ -112,6 +156,7 @@ def launch_gui() -> int:
             QProgressBar,
             QRadioButton,
             QTextEdit,
+            QTabWidget,
             QVBoxLayout,
             QWidget,
         )
@@ -445,6 +490,8 @@ def launch_gui() -> int:
         def __init__(self) -> None:
             super().__init__()
             self.worker: DownloadWorker | None = None
+            self.site_configs = load_site_configs()
+            self.site_config_widgets: dict[str, dict[str, object]] = {}
             self._build_ui()
 
         def _build_ui(self) -> None:
@@ -580,8 +627,65 @@ def launch_gui() -> int:
 
             root = QWidget()
             self.setCentralWidget(root)
-            outer = QVBoxLayout(root)
-            outer.setContentsMargins(18, 18, 18, 18)
+            shell = QHBoxLayout(root)
+            shell.setContentsMargins(18, 18, 18, 18)
+            shell.setSpacing(10)
+
+            sidebar = Card()
+            sidebar.setFixedWidth(320)
+            side_l = QVBoxLayout(sidebar)
+            side_l.setContentsMargins(12, 12, 12, 12)
+            side_l.addWidget(QLabel("网站配置"))
+            side_hint = QLabel("可配置站点入口与登录账号，便于网站地址变更或未来登录抓取。")
+            side_hint.setWordWrap(True)
+            side_hint.setStyleSheet(f"color:{S.SUB};")
+            side_l.addWidget(side_hint)
+
+            self.site_tabs = QTabWidget()
+            side_l.addWidget(self.site_tabs, 1)
+
+            for site_name, cfg in self.site_configs.items():
+                tab = QWidget()
+                tl = QVBoxLayout(tab)
+                tl.setContentsMargins(6, 6, 6, 6)
+                tl.setSpacing(8)
+
+                tl.addWidget(QLabel("入口链接"))
+                base_edit = QLineEdit(cfg.get("base_url", ""))
+                tl.addWidget(base_edit)
+
+                use_login = QCheckBox("该站点需要登录")
+                use_login.setChecked(bool(cfg.get("use_login", False)))
+                tl.addWidget(use_login)
+
+                tl.addWidget(QLabel("用户名"))
+                user_edit = QLineEdit(cfg.get("username", ""))
+                tl.addWidget(user_edit)
+
+                tl.addWidget(QLabel("密码"))
+                pwd_edit = QLineEdit(cfg.get("password", ""))
+                pwd_edit.setEchoMode(QLineEdit.Password)
+                tl.addWidget(pwd_edit)
+
+                save_btn = QPushButton("保存该站点配置")
+                save_btn.clicked.connect(lambda _=False, name=site_name: self.save_site_config(name))
+                tl.addWidget(save_btn)
+                tl.addStretch(1)
+
+                self.site_config_widgets[site_name] = {
+                    "base_url": base_edit,
+                    "use_login": use_login,
+                    "username": user_edit,
+                    "password": pwd_edit,
+                }
+                self.site_tabs.addTab(tab, site_name)
+
+            shell.addWidget(sidebar)
+
+            content = QWidget()
+            shell.addWidget(content, 1)
+            outer = QVBoxLayout(content)
+            outer.setContentsMargins(0, 0, 0, 0)
             outer.setSpacing(10)
 
             title = QLabel("小说下载与编辑工作台")
@@ -696,6 +800,24 @@ def launch_gui() -> int:
             bottom.addWidget(start_btn)
             outer.addLayout(bottom)
 
+        def save_site_config(self, site_name: str) -> None:
+            widgets = self.site_config_widgets.get(site_name)
+            if not widgets:
+                return
+            self.site_configs[site_name] = {
+                "base_url": widgets["base_url"].text().strip(),
+                "use_login": widgets["use_login"].isChecked(),
+                "username": widgets["username"].text().strip(),
+                "password": widgets["password"].text(),
+            }
+            save_site_configs(self.site_configs)
+            QMessageBox.information(self, "配置已保存", f"{site_name} 配置已保存。")
+
+        def current_site_default_url(self) -> str:
+            site_name = self.site_tabs.tabText(self.site_tabs.currentIndex()) if self.site_tabs.count() else ""
+            cfg = self.site_configs.get(site_name, {})
+            return str(cfg.get("base_url", "")).strip()
+
         def browse_output(self) -> None:
             path, _ = QFileDialog.getSaveFileName(self, "保存 EPUB", str(DEFAULT_OUTPUT_FILE), "EPUB Files (*.epub)")
             if path:
@@ -722,6 +844,11 @@ def launch_gui() -> int:
 
         def start_download(self) -> None:
             input_url = self.url_edit.text().strip()
+            if not input_url:
+                input_url = self.current_site_default_url()
+                if input_url:
+                    self.url_edit.setText(input_url)
+
             output_path = self.output_edit.text().strip()
             if not input_url or not output_path:
                 QMessageBox.critical(self, "参数错误", "请填写小说链接与输出文件路径。")

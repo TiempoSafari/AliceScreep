@@ -25,7 +25,9 @@ python novel_downloader.py
 - AliceSW 章节目录页：`https://www.alicesw.tw/other/chapters/id/2735.html`
 - SilverNoelle 分类目录页：`https://silvernoelle.com/category/.../`
 
-GUI 右侧“操作提示”卡片中也会显示“支持网站”列表，方便直接复制示例链接。
+GUI 右侧“操作提示”卡片中会显示“支持网站”列表，方便直接复制示例链接。
+
+主界面左侧新增“网站配置”边栏（按站点 Tab）：可配置入口链接、是否需要登录、用户名和密码。
 
 对 AliceSW，程序会自动优先使用完整章节目录页 `/other/chapters/id/{id}.html`，避免抓到导航/分类等无关页面；对 SilverNoelle，会自动跟随“较旧文章 / Older Posts”分页抓取完整章节列表，并按发布时间从旧到新下载。
 
