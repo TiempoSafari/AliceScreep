@@ -252,10 +252,13 @@ class SilverNoelleSiteAdapter(GenericSiteAdapter):
             )
             text = strip_tags(entry_html)
             text = re.sub(r"共享此文章：[\s\S]*$", "", text).strip()
-            if len(text) > 60:
+            if text:
                 return text
-        return super().extract_content(chapter_html)
 
+        # 某些页面正文结构不规则时，回退到通用正文提取，并继续清理分享文案。
+        fallback = super().extract_content(chapter_html)
+        fallback = re.sub(r"共享此文章：[\s\S]*$", "", fallback).strip()
+        return fallback
 
 def get_site_adapter(input_url: str) -> SiteAdapter:
     source = detect_source(input_url)
