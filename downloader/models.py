@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 SOURCE_ALICESW = "alicesw"
 SOURCE_SILVERNOELLE = "silvernoelle"
+SOURCE_ESJ = "esj"
 SOURCE_GENERIC = "generic"
 
 

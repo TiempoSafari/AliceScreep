@@ -8,7 +8,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from .http import fetch_bytes, fetch_html_with_retry
-from .models import Chapter, NovelMeta, SOURCE_ALICESW, SOURCE_GENERIC, SOURCE_SILVERNOELLE
+from .models import Chapter, NovelMeta, SOURCE_ALICESW, SOURCE_ESJ, SOURCE_GENERIC, SOURCE_SILVERNOELLE
 from .text import extract_title, sanitize_url, strip_tags
 
 
@@ -18,6 +18,8 @@ def detect_source(url: str) -> str:
         return SOURCE_ALICESW
     if "silvernoelle.com" in host:
         return SOURCE_SILVERNOELLE
+    if "esjzone.cc" in host:
+        return SOURCE_ESJ
     return SOURCE_GENERIC
 
 
@@ -260,12 +262,116 @@ class SilverNoelleSiteAdapter(GenericSiteAdapter):
         fallback = re.sub(r"共享此文章：[\s\S]*$", "", fallback).strip()
         return fallback
 
+
+
+class ESJZoneSiteAdapter(GenericSiteAdapter):
+    source = SOURCE_ESJ
+
+    def build_chapter_index_url(self, input_url: str) -> str | None:
+        parsed = urlparse(input_url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return input_url
+
+    def discover_chapters(self, index_url: str, html_text: str, logger: Callable[[str], None]) -> list[Chapter]:
+        parser = AnchorParser()
+        parser.feed(html_text)
+        parsed_index = urlparse(index_url)
+
+        chapters: list[Chapter] = []
+        seen: set[str] = set()
+        skipped_cross_site = skipped_non_chapter = 0
+        order = 0
+
+        for href, text in parser.links:
+            chapter_url = sanitize_url(href, base_url=index_url)
+            if not chapter_url:
+                skipped_non_chapter += 1
+                continue
+
+            chapter_url = chapter_url.split('#', 1)[0]
+            parsed = urlparse(chapter_url)
+            if parsed.netloc and parsed.netloc != parsed_index.netloc:
+                skipped_cross_site += 1
+                continue
+
+            path = parsed.path.lower()
+            if '/forum/' not in path or not path.endswith('.html'):
+                skipped_non_chapter += 1
+                continue
+
+            # 常见非章节页（列表、标签页）过滤
+            if path.endswith('/forum.html') or path.endswith('/forum/index.html'):
+                skipped_non_chapter += 1
+                continue
+
+            if chapter_url in seen:
+                continue
+            seen.add(chapter_url)
+            order += 1
+
+            title = strip_tags(text)
+            if not title:
+                title = parsed.path.rsplit('/', 1)[-1].replace('.html', '')
+            chapters.append(Chapter(title=title, url=chapter_url, order=order))
+
+        logger(
+            f"章节解析完成：候选链接 {len(parser.links)}，有效章节 {len(chapters)}，过滤(跨站={skipped_cross_site}, 非章节={skipped_non_chapter})"
+        )
+        return chapters
+
+    def extract_meta(self, index_html: str, fallback_title: str = "未命名小说") -> NovelMeta:
+        title = fallback_title
+        author = "未知作者"
+
+        for pattern in (
+            r'<h1[^>]*>(.*?)</h1>',
+            r'<h2[^>]+class=["\'][^"\']*(?:book-name|bookName|book_title|book-title)[^"\']*["\'][^>]*>(.*?)</h2>',
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+        ):
+            m = re.search(pattern, index_html, re.I | re.S)
+            if m:
+                title = strip_tags(m.group(1))
+                break
+
+        title = re.sub(r'\s*[-|｜]\s*ESJ(?:\s*Zone)?\s*$', '', title, flags=re.I).strip() or fallback_title
+
+        for pattern in (
+            r'作者\s*[：:]\s*</span>\s*<a[^>]*>(.*?)</a>',
+            r'作者\s*[：:]\s*<a[^>]*>(.*?)</a>',
+            r'作者\s*[：:]\s*([^<\n]+)',
+        ):
+            m = re.search(pattern, index_html, re.I | re.S)
+            if m:
+                author = strip_tags(m.group(1)).strip()
+                if author:
+                    break
+
+        return NovelMeta(title=title, author=author or "未知作者")
+
+    def extract_content(self, chapter_html: str) -> str:
+        for pattern in (
+            r'<div[^>]+id=["\'](?:chapter-content|article-content|content)["\'][^>]*>(.*?)</div>',
+            r'<div[^>]+class=["\'][^"\']*(?:forum-content|article-content|content-body|bbcode-content|forum-post-content|post-content)[^"\']*["\'][^>]*>(.*?)</div>',
+            r'<article[^>]*>(.*?)</article>',
+        ):
+            m = re.search(pattern, chapter_html, re.I | re.S)
+            if not m:
+                continue
+            raw = re.sub(r'<(?:script|style)[^>]*>.*?</(?:script|style)>', '', m.group(1), flags=re.I | re.S)
+            text = strip_tags(raw)
+            if text:
+                return text
+        return super().extract_content(chapter_html)
+
 def get_site_adapter(input_url: str) -> SiteAdapter:
     source = detect_source(input_url)
     if source == SOURCE_ALICESW:
         return AliceSWSiteAdapter()
     if source == SOURCE_SILVERNOELLE:
         return SilverNoelleSiteAdapter()
+    if source == SOURCE_ESJ:
+        return ESJZoneSiteAdapter()
     return GenericSiteAdapter()
 
 

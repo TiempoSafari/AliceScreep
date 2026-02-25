@@ -16,8 +16,8 @@ from downloader.text import safe_filename
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="下载 AliceSW/SilverNoelle 小说并导出成 EPUB")
-    parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html 或 https://silvernoelle.com/category/.../")
+    parser = argparse.ArgumentParser(description="下载 AliceSW/SilverNoelle/ESJZone 小说并导出成 EPUB")
+    parser.add_argument("index_url", nargs="?", help="小说链接，例如 https://www.alicesw.tw/novel/2735.html / https://silvernoelle.com/category/.../ / https://www.esjzone.cc/detail/1768217077.html")
     parser.add_argument("-o", "--output", default=str(DEFAULT_OUTPUT_FILE), help="输出 EPUB 文件路径（默认 output/novel.epub，自动可按书名命名）")
     parser.add_argument("--delay", type=float, default=0.2, help="每章下载间隔秒数，默认 0.2")
     parser.add_argument("--start", type=int, default=1, help="起始章节（从1开始）")
@@ -30,11 +30,13 @@ def parse_args() -> argparse.Namespace:
 DEFAULT_OUTPUT_DIR = Path.cwd() / "output"
 DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "novel.epub"
 DEFAULT_STASH_DIR = DEFAULT_OUTPUT_DIR / "stash"
+DEFAULT_CONFIG_DIR = Path.cwd() / "config"
 
 
 def _ensure_output_dirs() -> None:
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_STASH_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def save_payload_stash(path: Path, payload: DownloadPayload) -> None:
@@ -88,7 +90,7 @@ def load_payload_stash(path: Path) -> DownloadPayload:
 
 
 
-SITE_CONFIG_FILE = DEFAULT_OUTPUT_DIR / "site_configs.json"
+SITE_CONFIG_FILE = DEFAULT_CONFIG_DIR / "site_configs.json"
 DEFAULT_SITE_CONFIGS = {
     "AliceSW": {
         "base_url": "https://www.alicesw.tw/novel/2735.html",
@@ -98,6 +100,12 @@ DEFAULT_SITE_CONFIGS = {
     },
     "SilverNoelle": {
         "base_url": "https://silvernoelle.com/category/.../",
+        "username": "",
+        "password": "",
+        "use_login": False,
+    },
+    "ESJZone": {
+        "base_url": "https://www.esjzone.cc/detail/1768217077.html",
         "username": "",
         "password": "",
         "use_login": False,
@@ -824,6 +832,7 @@ def launch_gui() -> int:
             for site_name, sample in [
                 ("AliceSW", "https://www.alicesw.tw/novel/2735.html"),
                 ("SilverNoelle", "https://silvernoelle.com/category/.../"),
+                ("ESJZone", "https://www.esjzone.cc/detail/1768217077.html"),
             ]:
                 row = QLabel(f"• {site_name}\n  {sample}")
                 row.setWordWrap(True)
